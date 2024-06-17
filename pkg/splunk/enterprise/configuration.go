@@ -24,7 +24,7 @@ import (
 	"reflect"
 	"strconv"
 
-	"github.com/wk8/go-ordered-map/v2"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,6 +39,7 @@ import (
 	splcommon "github.com/splunk/splunk-operator/pkg/splunk/common"
 	splctrl "github.com/splunk/splunk-operator/pkg/splunk/controller"
 	splutil "github.com/splunk/splunk-operator/pkg/splunk/util"
+	"gopkg.in/ini.v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -180,6 +181,10 @@ func getSplunkService(ctx context.Context, cr splcommon.MetaObject, spec *enterp
 			// And for child parts of multisite / multipart IndexerCluster, use the name of the part containing the cluster-manager
 			// in the app.kubernetes.io/part-of label
 			partOfIdentifier = spec.ClusterManagerRef.Name
+		} else if len(spec.NoahClusterRef.Name) > 0 {
+			// And for child parts of multisite / multipart Noah Cluster, use the name of the part containing the noah-cluster
+			// in the app.kubernetes.io/part-of label
+			partOfIdentifier = spec.NoahClusterRef.Name
 		} else if len(spec.ClusterMasterRef.Name) > 0 {
 			// And for child parts of multisite / multipart IndexerCluster, use the name of the part containing the cluster-manager
 			// in the app.kubernetes.io/part-of label
@@ -337,6 +342,10 @@ func validateCommonSplunkSpec(ctx context.Context, c splcommon.ControllerClient,
 	// if not specified via spec or env, image defaults to splunk/splunk
 	spec.Image = GetSplunkImage(spec.Image)
 
+	if cr.GroupVersionKind().Kind == "NoahCluster" {
+		spec.Image = GetNoahImage(spec.Image)
+	}
+
 	defaultResources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("0.1"),
@@ -403,6 +412,19 @@ func ValidateImagePullSecrets(ctx context.Context, c splcommon.ControllerClient,
 	}
 
 	return nil
+}
+
+// getNoahDefaults returns a Kubernetes ConfigMap containing defaults for a Splunk Enterprise resource.
+func getNoahDefaults(identifier, namespace string, instanceType InstanceType, defaults string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      GetSplunkDefaultsName(identifier, instanceType),
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			"default.yml": defaults,
+		},
+	}
 }
 
 // getSplunkDefaults returns a Kubernetes ConfigMap containing defaults for a Splunk Enterprise resource.
@@ -614,6 +636,107 @@ func addProbeConfigMapVolume(configMap *corev1.ConfigMap, statefulSet *appsv1.St
 	})
 }
 
+// getNoahDeployment returns a Kubernetes Deployment object for Noah instances
+func getNoahDeployment(ctx context.Context, client splcommon.ControllerClient, cr splcommon.MetaObject, spec *enterpriseApi.CommonSplunkSpec, instanceType InstanceType, replicas int32, extraEnv []corev1.EnvVar) (*appsv1.Deployment, error) {
+
+	// prepare misc values
+	ports := splcommon.SortContainerPorts(getSplunkContainerPorts(instanceType)) // note that port order is important for tests
+	annotations := splcommon.GetIstioAnnotations(ports)
+	selectLabels := getSplunkLabels(cr.GetName(), instanceType, spec.NoahClusterRef.Name)
+	if len(spec.NoahClusterRef.Name) > 0 && len(spec.NoahClusterRef.Name) == 0 {
+		selectLabels = getSplunkLabels(cr.GetName(), instanceType, spec.NoahClusterRef.Name)
+	}
+	affinity := splcommon.AppendPodAntiAffinity(&spec.Affinity, cr.GetName(), instanceType.ToString())
+
+	// start with same labels as selector; note that this object gets modified by splcommon.AppendParentMeta()
+	labels := make(map[string]string)
+	for k, v := range selectLabels {
+		labels[k] = v
+	}
+
+	namespacedName := types.NamespacedName{
+		Namespace: cr.GetNamespace(),
+		Name:      GetSplunkStatefulsetName(instanceType, cr.GetName()),
+	}
+	deployment := &appsv1.Deployment{}
+	err := client.Get(ctx, namespacedName, deployment)
+	if err != nil && !k8serrors.IsNotFound(err) {
+		return nil, err
+	}
+
+	if k8serrors.IsNotFound(err) {
+		// create statefulset configuration
+		deployment = &appsv1.Deployment{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "Deployment",
+				APIVersion: "apps/v1",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      GetSplunkStatefulsetName(instanceType, cr.GetName()),
+				Namespace: cr.GetNamespace(),
+			},
+		}
+	}
+
+	deployment.Spec = appsv1.DeploymentSpec{
+		Selector: &metav1.LabelSelector{
+			MatchLabels: selectLabels,
+		},
+		Replicas: &replicas,
+		Strategy: appsv1.DeploymentStrategy{
+			Type: appsv1.RollingUpdateDeploymentStrategyType,
+		},
+		Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels:      labels,
+				Annotations: annotations,
+			},
+			Spec: corev1.PodSpec{
+				Affinity:                  affinity,
+				Tolerations:               spec.Tolerations,
+				TopologySpreadConstraints: spec.TopologySpreadConstraints,
+				SchedulerName:             spec.SchedulerName,
+				ImagePullSecrets:          spec.ImagePullSecrets,
+				Containers: []corev1.Container{
+					{
+						Image:           spec.Image,
+						ImagePullPolicy: corev1.PullPolicy(spec.ImagePullPolicy),
+						Name:            "noah",
+						Ports:           ports,
+					},
+				},
+			},
+		},
+	}
+
+	// add serviceaccount if configured
+	if spec.ServiceAccount != "" {
+		namespacedName := types.NamespacedName{Namespace: deployment.GetNamespace(), Name: spec.ServiceAccount}
+		_, err := splctrl.GetServiceAccount(ctx, client, namespacedName)
+		if err == nil {
+			// serviceAccount exists
+			deployment.Spec.Template.Spec.ServiceAccountName = spec.ServiceAccount
+		}
+	}
+
+	// append labels and annotations from parent
+	splcommon.AppendParentMeta(deployment.Spec.Template.GetObjectMeta(), cr.GetObjectMeta())
+
+	// retrieve the secret to upload to the statefulSet pod
+	statefulSetSecret, err := splutil.GetLatestVersionedSecret(ctx, client, cr, cr.GetNamespace(), deployment.GetName())
+	if err != nil || statefulSetSecret == nil {
+		return deployment, err
+	}
+
+	// update statefulset's pod template with common splunk pod config
+	updateSplunkPodTemplateWithConfig(ctx, client, &deployment.Spec.Template, cr, spec, instanceType, extraEnv, statefulSetSecret.GetName())
+
+	// make Splunk Enterprise object the owner
+	deployment.SetOwnerReferences(append(deployment.GetOwnerReferences(), splcommon.AsOwner(cr, true)))
+
+	return deployment, nil
+}
+
 // getSplunkStatefulSet returns a Kubernetes StatefulSet object for Splunk instances configured for a Splunk Enterprise resource.
 func getSplunkStatefulSet(ctx context.Context, client splcommon.ControllerClient, cr splcommon.MetaObject, spec *enterpriseApi.CommonSplunkSpec, instanceType InstanceType, replicas int32, extraEnv []corev1.EnvVar) (*appsv1.StatefulSet, error) {
 
@@ -815,6 +938,9 @@ func updateSplunkPodTemplateWithConfig(ctx context.Context, client splcommon.Con
 				Items: []corev1.KeyToPath{
 					{Key: "indexes.conf", Path: "indexes.conf", Mode: &configMapVolDefaultMode},
 					{Key: "server.conf", Path: "server.conf", Mode: &configMapVolDefaultMode},
+					{Key: "authorize.conf", Path: "authorize.conf", Mode: &configMapVolDefaultMode},
+					{Key: "limits.conf", Path: "limits.conf", Mode: &configMapVolDefaultMode},
+					{Key: "outputs.conf", Path: "outputs.conf", Mode: &configMapVolDefaultMode},
 					{Key: configToken, Path: configToken, Mode: &configMapVolDefaultMode},
 				},
 			},
@@ -833,10 +959,12 @@ func updateSplunkPodTemplateWithConfig(ctx context.Context, client splcommon.Con
 	runAsUser := int64(41812)
 	fsGroup := int64(41812)
 	runAsNonRoot := true
+	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
 	podTemplateSpec.Spec.SecurityContext = &corev1.PodSecurityContext{
-		RunAsUser:    &runAsUser,
-		FSGroup:      &fsGroup,
-		RunAsNonRoot: &runAsNonRoot,
+		RunAsUser:           &runAsUser,
+		FSGroup:             &fsGroup,
+		RunAsNonRoot:        &runAsNonRoot,
+		FSGroupChangePolicy: &fsGroupChangePolicy,
 	}
 
 	livenessProbe := getLivenessProbe(ctx, cr, instanceType, spec)
@@ -993,6 +1121,122 @@ func updateSplunkPodTemplateWithConfig(ctx context.Context, client splcommon.Con
 			Value: spec.MonitoringConsoleRef.Name,
 		})
 	}
+
+	// Add extraEnv from the CommonSplunkSpec config to the extraEnv variable list
+	extraEnv = append(spec.ExtraEnv, extraEnv...)
+
+	// append any extra variables adding environment variable from extraEnv in the first
+	// so when duplicates are removed the last ones are removed from the list
+	env = append(extraEnv, env...)
+	//env = append(env, extraEnv...)
+
+	// check if there are any duplicate entries
+	// we use orderedmap so the test case can pass as json marshal
+	// expects order
+	if len(env) > 0 {
+		env = removeDuplicateEnvVars(env)
+	}
+
+	privileged := false
+	// update each container in pod
+	for idx := range podTemplateSpec.Spec.Containers {
+		podTemplateSpec.Spec.Containers[idx].Resources = spec.Resources
+		podTemplateSpec.Spec.Containers[idx].LivenessProbe = livenessProbe
+		podTemplateSpec.Spec.Containers[idx].ReadinessProbe = readinessProbe
+		podTemplateSpec.Spec.Containers[idx].StartupProbe = startupProbe
+		podTemplateSpec.Spec.Containers[idx].Env = env
+		podTemplateSpec.Spec.Containers[idx].SecurityContext = &corev1.SecurityContext{
+			RunAsUser:                &runAsUser,
+			RunAsNonRoot:             &runAsNonRoot,
+			AllowPrivilegeEscalation: &[]bool{false}[0],
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{
+					"ALL",
+				},
+				Add: []corev1.Capability{
+					"NET_BIND_SERVICE",
+				},
+			},
+			Privileged: &privileged,
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		}
+	}
+}
+
+// updateNoahPodTemplateWithConfig modifies the podTemplateSpec object based on configuration of the Splunk Enterprise resource.
+func updateNoahPodTemplateWithConfig(ctx context.Context, client splcommon.ControllerClient, podTemplateSpec *corev1.PodTemplateSpec, cr splcommon.MetaObject, spec *enterpriseApi.CommonSplunkSpec, instanceType InstanceType, extraEnv []corev1.EnvVar, secretToMount string) {
+
+	reqLogger := log.FromContext(ctx)
+	scopedLog := reqLogger.WithName("updateNoahPodTemplateWithConfig").WithValues("name", cr.GetName(), "namespace", cr.GetNamespace())
+	// Add custom ports to splunk containers
+	if spec.ServiceTemplate.Spec.Ports != nil {
+		for idx := range podTemplateSpec.Spec.Containers {
+			for _, p := range spec.ServiceTemplate.Spec.Ports {
+
+				podTemplateSpec.Spec.Containers[idx].Ports = append(podTemplateSpec.Spec.Containers[idx].Ports, corev1.ContainerPort{
+					Name:          p.Name,
+					ContainerPort: int32(p.TargetPort.IntValue()),
+					Protocol:      p.Protocol,
+				})
+			}
+		}
+	}
+
+	// Explicitly set the default value here so we can compare for changes correctly with current statefulset.
+	secretVolDefaultMode := int32(corev1.SecretVolumeSourceDefaultMode)
+	addSplunkVolumeToTemplate(podTemplateSpec, "mnt-splunk-secrets", "/mnt/splunk-secrets", corev1.VolumeSource{
+		Secret: &corev1.SecretVolumeSource{
+			SecretName:  secretToMount,
+			DefaultMode: &secretVolDefaultMode,
+		},
+	})
+
+	// Explicitly set the default value here so we can compare for changes correctly with current statefulset.
+	configMapVolDefaultMode := int32(corev1.ConfigMapVolumeSourceDefaultMode)
+
+	// add inline defaults to all splunk containers other than MC(where CR spec defaults are not needed)
+	if spec.Defaults != "" {
+		configMapName := GetSplunkDefaultsName(cr.GetName(), instanceType)
+		addSplunkVolumeToTemplate(podTemplateSpec, "mnt-splunk-defaults", "/mnt/splunk-defaults", corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: configMapName,
+				},
+				DefaultMode: &configMapVolDefaultMode,
+			},
+		})
+
+		namespacedName := types.NamespacedName{Namespace: cr.GetNamespace(), Name: configMapName}
+
+		// We will update the annotation for resource version in the pod template spec
+		// so that any change in the ConfigMap will lead to recycle of the pod.
+		configMapResourceVersion, err := splctrl.GetConfigMapResourceVersion(ctx, client, namespacedName)
+		if err == nil {
+			podTemplateSpec.ObjectMeta.Annotations["defaultConfigRev"] = configMapResourceVersion
+		} else {
+			scopedLog.Error(err, "Updation of default configMap annotation failed")
+		}
+	}
+
+	// update security context
+	runAsUser := int64(41812)
+	fsGroup := int64(41812)
+	runAsNonRoot := true
+	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
+	podTemplateSpec.Spec.SecurityContext = &corev1.PodSecurityContext{
+		RunAsUser:           &runAsUser,
+		FSGroup:             &fsGroup,
+		RunAsNonRoot:        &runAsNonRoot,
+		FSGroupChangePolicy: &fsGroupChangePolicy,
+	}
+
+	livenessProbe := getLivenessProbe(ctx, cr, instanceType, spec)
+	readinessProbe := getReadinessProbe(ctx, cr, instanceType, spec)
+	startupProbe := getStartupProbe(ctx, cr, instanceType, spec)
+
+	env := []corev1.EnvVar{}
 
 	// Add extraEnv from the CommonSplunkSpec config to the extraEnv variable list
 	extraEnv = append(spec.ExtraEnv, extraEnv...)
@@ -1423,10 +1667,9 @@ func validateSplunkAppSources(appFramework *enterpriseApi.AppFrameworkSpec, loca
 	duplicateAppSourceStorageChecker[enterpriseApi.ScopeLocal] = make(map[string]bool)
 	duplicateAppSourceStorageChecker[enterpriseApi.ScopePremiumApps] = make(map[string]bool)
 
-	if !localOrPremScope {
-		duplicateAppSourceStorageChecker[enterpriseApi.ScopeCluster] = make(map[string]bool)
-		duplicateAppSourceStorageChecker[enterpriseApi.ScopeClusterWithPreConfig] = make(map[string]bool)
-	}
+	// CSPL-2574 - Assign just in case invalid scope is passed through!
+	duplicateAppSourceStorageChecker[enterpriseApi.ScopeCluster] = make(map[string]bool)
+	duplicateAppSourceStorageChecker[enterpriseApi.ScopeClusterWithPreConfig] = make(map[string]bool)
 
 	duplicateAppSourceNameChecker := make(map[string]bool)
 
@@ -1728,8 +1971,8 @@ func ValidateSplunkSmartstoreSpec(ctx context.Context, smartstore *enterpriseApi
 }
 
 // GetSmartstoreVolumesConfig returns the list of Volumes configuration in INI format
-func GetSmartstoreVolumesConfig(ctx context.Context, client splcommon.ControllerClient, cr splcommon.MetaObject, smartstore *enterpriseApi.SmartStoreSpec, mapData map[string]string) (string, error) {
-	var volumesConf string
+func GetSmartstoreVolumesConfig(ctx context.Context, client splcommon.ControllerClient, cr splcommon.MetaObject, smartstore *enterpriseApi.SmartStoreSpec, indexIni *ini.File) (bool, error) {
+	var volumesConfigured bool
 
 	reqLogger := log.FromContext(ctx)
 	scopedLog := reqLogger.WithName("GetSmartstoreVolumesConfig")
@@ -1739,71 +1982,67 @@ func GetSmartstoreVolumesConfig(ctx context.Context, client splcommon.Controller
 		if volumes[i].SecretRef != "" {
 			s3AccessKey, s3SecretKey, _, err := GetSmartstoreRemoteVolumeSecrets(ctx, volumes[i], client, cr, smartstore)
 			if err != nil {
-				return "", fmt.Errorf("unable to read the secrets for volume = %s. %s", volumes[i].Name, err)
+				return volumesConfigured, fmt.Errorf("unable to read the secrets for volume = %s. %s", volumes[i].Name, err)
 			}
-
-			volumesConf = fmt.Sprintf(`%s
-[volume:%s]
-storageType = remote
-path = s3://%s
-remote.s3.access_key = %s
-remote.s3.secret_key = %s
-remote.s3.endpoint = %s
-remote.s3.auth_region = %s
-`, volumesConf, volumes[i].Name, volumes[i].Path, s3AccessKey, s3SecretKey, volumes[i].Endpoint, volumes[i].Region)
+			volumeName := fmt.Sprintf("volume:%s", volumes[i].Name)
+			path := fmt.Sprintf("s3://%s", volumes[i].Path)
+			indexIni.Section(volumeName).Key("storageType").SetValue("remote")
+			indexIni.Section(volumeName).Key("path").SetValue(path)
+			indexIni.Section(volumeName).Key("remote.s3.access_key").SetValue(s3AccessKey)
+			indexIni.Section(volumeName).Key("remote.s3.secret_key").SetValue(s3SecretKey)
+			indexIni.Section(volumeName).Key("remote.s3.endpoint").SetValue(volumes[i].Endpoint)
+			indexIni.Section(volumeName).Key("remote.s3.auth_region").SetValue(volumes[i].Region)
+			volumesConfigured = true
 		} else {
 			scopedLog.Info("No valid secretRef configured.  Configure volume without access/secret keys", "volumeName", volumes[i].Name)
-			volumesConf = fmt.Sprintf(`%s
-[volume:%s]
-storageType = remote
-path = s3://%s
-remote.s3.endpoint = %s
-remote.s3.auth_region = %s
-`, volumesConf, volumes[i].Name, volumes[i].Path, volumes[i].Endpoint, volumes[i].Region)
+			volumeName := fmt.Sprintf("volume:%s", volumes[i].Name)
+			path := fmt.Sprintf("s3://%s", volumes[i].Path)
+			indexIni.Section(volumeName).Key("storageType").SetValue("remote")
+			indexIni.Section(volumeName).Key("path").SetValue(path)
+			indexIni.Section(volumeName).Key("endpoint").SetValue(volumes[i].Endpoint)
+			indexIni.Section(volumeName).Key("remote.s3.auth_region").SetValue(volumes[i].Region)
+			volumesConfigured = true
 		}
 	}
 
-	return volumesConf, nil
+	return volumesConfigured, nil
 }
 
 // GetSmartstoreIndexesConfig returns the list of indexes configuration in INI format
-func GetSmartstoreIndexesConfig(indexes []enterpriseApi.IndexSpec) string {
+func GetSmartstoreIndexesConfig(ctx context.Context, indexes []enterpriseApi.IndexSpec, indexIni *ini.File) string {
 
 	var indexesConf string
 
 	defaultRemotePath := "$_index_name"
 
 	for i := 0; i < len(indexes); i++ {
-		// Write the index stanza name
-		indexesConf = fmt.Sprintf(`%s
-[%s]`, indexesConf, indexes[i].Name)
-
+		indexName := indexes[i].Name
 		if indexes[i].RemotePath != "" && indexes[i].VolName != "" {
-			indexesConf = fmt.Sprintf(`%s
-remotePath = volume:%s/%s`, indexesConf, indexes[i].VolName, indexes[i].RemotePath)
+			indexesRemotePath := fmt.Sprintf(`volume:%s/%s`, indexes[i].VolName, indexes[i].RemotePath)
+			indexIni.Section(indexName).Key("remotePath").SetValue(indexesRemotePath)
 		} else if indexes[i].VolName != "" {
-			indexesConf = fmt.Sprintf(`%s
-remotePath = volume:%s/%s`, indexesConf, indexes[i].VolName, defaultRemotePath)
+			indexesRemotePath := fmt.Sprintf(`volume:%s/%s`, indexes[i].VolName, defaultRemotePath)
+			indexIni.Section(indexName).Key("remotePath").SetValue(indexesRemotePath)
 		}
 
 		if indexes[i].HotlistBloomFilterRecencyHours != 0 {
-			indexesConf = fmt.Sprintf(`%s
-hotlist_bloom_filter_recency_hours = %d`, indexesConf, indexes[i].HotlistBloomFilterRecencyHours)
+			hotlistBloomFilterRecencyHours := fmt.Sprintf(`%d`, indexes[i].HotlistBloomFilterRecencyHours)
+			indexIni.Section(indexName).Key("hotlist_bloom_filter_recency_hours").SetValue(hotlistBloomFilterRecencyHours)
 		}
 
 		if indexes[i].HotlistRecencySecs != 0 {
-			indexesConf = fmt.Sprintf(`%s
-hotlist_recency_secs = %d`, indexesConf, indexes[i].HotlistRecencySecs)
+			hotlistRecencySecs := fmt.Sprintf(`%d`, indexes[i].HotlistRecencySecs)
+			indexIni.Section(indexName).Key("hotlist_recency_secs").SetValue(hotlistRecencySecs)
 		}
 
 		if indexes[i].MaxGlobalDataSizeMB != 0 {
-			indexesConf = fmt.Sprintf(`%s
-maxGlobalDataSizeMB = %d`, indexesConf, indexes[i].MaxGlobalDataSizeMB)
+			maxGlobalDataSizeMB := fmt.Sprintf(`%d`, indexes[i].MaxGlobalDataSizeMB)
+			indexIni.Section(indexName).Key("maxGlobalDataSizeMB").SetValue(maxGlobalDataSizeMB)
 		}
 
 		if indexes[i].MaxGlobalRawDataSizeMB != 0 {
-			indexesConf = fmt.Sprintf(`%s
-maxGlobalRawDataSizeMB = %d`, indexesConf, indexes[i].MaxGlobalRawDataSizeMB)
+			maxGlobalRawDataSizeMB := fmt.Sprintf(`%d`, indexes[i].MaxGlobalRawDataSizeMB)
+			indexIni.Section(indexName).Key("maxGlobalRawDataSizeMB").SetValue(maxGlobalRawDataSizeMB)
 		}
 
 		// Add a new line in betwen index stanzas
@@ -1816,7 +2055,7 @@ maxGlobalRawDataSizeMB = %d`, indexesConf, indexes[i].MaxGlobalRawDataSizeMB)
 }
 
 // GetServerConfigEntries prepares the server.conf entries, and returns as a string
-func GetServerConfigEntries(cacheManagerConf *enterpriseApi.CacheManagerSpec) string {
+func GetServerConfigEntries(ctx context.Context, cacheManagerConf *enterpriseApi.CacheManagerSpec, serverCfg *ini.File) string {
 	if cacheManagerConf == nil {
 		return ""
 	}
@@ -1827,38 +2066,42 @@ func GetServerConfigEntries(cacheManagerConf *enterpriseApi.CacheManagerSpec) st
 	emptyStanza := serverConfIni
 
 	if cacheManagerConf.EvictionPaddingSizeMB != 0 {
-		serverConfIni = fmt.Sprintf(`%s
-eviction_padding = %d`, serverConfIni, cacheManagerConf.EvictionPaddingSizeMB)
+		evictionPaddingSizeMB := fmt.Sprintf(`%d`, cacheManagerConf.EvictionPaddingSizeMB)
+		serverCfg.Section("cachemanager").Key("eviction_padding").SetValue(evictionPaddingSizeMB)
 	}
 
 	if cacheManagerConf.EvictionPolicy != "" {
-		serverConfIni = fmt.Sprintf(`%s
-eviction_policy = %s`, serverConfIni, cacheManagerConf.EvictionPolicy)
+		serverCfg.Section("cachemanager").Key("eviction_policy").SetValue(cacheManagerConf.EvictionPolicy)
 	}
 
 	if cacheManagerConf.HotlistBloomFilterRecencyHours != 0 {
-		serverConfIni = fmt.Sprintf(`%s
-hotlist_bloom_filter_recency_hours = %d`, serverConfIni, cacheManagerConf.HotlistBloomFilterRecencyHours)
+		hotlistBloomFilterRecencyHours := fmt.Sprintf(`%d`, cacheManagerConf.HotlistBloomFilterRecencyHours)
+		serverCfg.Section("cachemanager").Key("hotlist_bloom_filter_recency_hours").SetValue(hotlistBloomFilterRecencyHours)
 	}
 
 	if cacheManagerConf.HotlistRecencySecs != 0 {
-		serverConfIni = fmt.Sprintf(`%s
-hotlist_recency_secs = %d`, serverConfIni, cacheManagerConf.HotlistRecencySecs)
+		hotlistRecencySecs := fmt.Sprintf(`%d`, cacheManagerConf.HotlistRecencySecs)
+		serverCfg.Section("cachemanager").Key("hotlist_recency_secs").SetValue(hotlistRecencySecs)
 	}
 
 	if cacheManagerConf.MaxCacheSizeMB != 0 {
-		serverConfIni = fmt.Sprintf(`%s
-max_cache_size = %d`, serverConfIni, cacheManagerConf.MaxCacheSizeMB)
+		maxCacheSizeMB := fmt.Sprintf(`%d`, cacheManagerConf.MaxCacheSizeMB)
+		serverCfg.Section("cachemanager").Key("max_cache_size").SetValue(maxCacheSizeMB)
 	}
 
 	if cacheManagerConf.MaxConcurrentDownloads != 0 {
-		serverConfIni = fmt.Sprintf(`%s
-max_concurrent_downloads = %d`, serverConfIni, cacheManagerConf.MaxConcurrentDownloads)
+		maxConcurrentDownloads := fmt.Sprintf(`%d`, cacheManagerConf.MaxConcurrentDownloads)
+		serverCfg.Section("cachemanager").Key("max_concurrent_downloads").SetValue(maxConcurrentDownloads)
 	}
 
 	if cacheManagerConf.MaxConcurrentUploads != 0 {
-		serverConfIni = fmt.Sprintf(`%s
-max_concurrent_uploads = %d`, serverConfIni, cacheManagerConf.MaxConcurrentUploads)
+		maxConcurrentUploads := fmt.Sprintf(`%d`, cacheManagerConf.MaxConcurrentUploads)
+		serverCfg.Section("cachemanager").Key("max_concurrent_uploads").SetValue(maxConcurrentUploads)
+	}
+
+	if cacheManagerConf.MaxConcurrentUploads != 0 {
+		localDeleteSummaryMetadataTtl := fmt.Sprintf(`%d`, cacheManagerConf.LocalDeleteSummaryMetadataTtl)
+		serverCfg.Section("cachemanager").Key("local_delete_summary_metadata_ttl").SetValue(localDeleteSummaryMetadataTtl)
 	}
 
 	if emptyStanza == serverConfIni {
@@ -1871,43 +2114,281 @@ max_concurrent_uploads = %d`, serverConfIni, cacheManagerConf.MaxConcurrentUploa
 	return serverConfIni
 }
 
+// GetNoahGeneralConfiguration prepares the server.conf entries, and returns as a string
+func GetNoahGeneralConfiguration(ctx context.Context, serverCfg *ini.File) error {
+
+	//reqLogger := log.FromContext(ctx)
+	//scopedLog := reqLogger.WithName("GetNoahServerConfiguration")
+
+	serverCfg.Section("general").Key("allowRemoteLogin").SetValue("always")
+	serverCfg.Section("general").Key("remoteStorageRecreateIndexesInStandalone").SetValue("150")
+	serverCfg.Section("general").Key("recreate_bucket_fetch_manifest_batch_size").SetValue("1000")
+
+	return nil
+}
+
+// GetNoahServerConfiguration prepares the server.conf entries, and returns as a string
+func GetNoahServerConfiguration(ctx context.Context, noahService *enterpriseApi.NoahService, secret *corev1.Secret, searchHead bool, serverCfg *ini.File) error {
+
+	reqLogger := log.FromContext(ctx)
+	scopedLog := reqLogger.WithName("GetNoahServerConfiguration")
+
+	if noahService == nil {
+		return nil
+	}
+
+	// uri = http://sok-noah.noah.svc.cluster.local:8443
+	// heartbeatPeriod = 0
+	// heartbeatAsPercentageOfLease = 25.0%
+	// tenant = test3
+	// remoteBundle = s3://noahappframework/test3/smartstore/
+	// pass4SymmKey = $7$COX5QF9IQyRQPjWS8+NQl2f8KTehCnxWLfbICmf11aQTFE9+PsFVB5kTIo7ZTZzlghEqNcOiv6s=
+	// # advertisedAddr = https://splunk-stdln-shc-standalone-service.test3.svc.cluster.local:8089
+	// # usePeers = false
+	// pass4SymmKey_minLength = 10
+	// reportIndexDeletion = true
+	// cacheBucketTimeout = 3
+
+	if noahService.Uri != "" {
+		serverCfg.Section("noahService").Key("uri").SetValue(noahService.Uri)
+	}
+	serverCfg.Section("noahService").Key("heartbeatPeriod").SetValue(strconv.Itoa(noahService.HeartbeatPeriod))
+
+	if noahService.HeartbeatAsPercentageOfLease != 0 {
+		value := fmt.Sprintf("%d.0%%", noahService.HeartbeatAsPercentageOfLease)
+		serverCfg.Section("noahService").Key("heartbeatAsPercentageOfLease").SetValue(value)
+	}
+	if noahService.Tenant != "" {
+		serverCfg.Section("noahService").Key("tenant").SetValue(noahService.Tenant)
+	}
+
+	if noahService.RemoteBundle != "" {
+		serverCfg.Section("noahService").Key("remoteBundle").SetValue(noahService.RemoteBundle)
+	}
+	symPassword, foundSecret := secret.Data["pass4SymmKey"]
+	if foundSecret {
+		serverCfg.Section("noahService").Key("pass4SymmKey").SetValue(string(symPassword))
+	} else {
+		scopedLog.Error(nil, "unable to get pass4SymmKey")
+	}
+
+	if !searchHead {
+		serverCfg.Section("noahService").Key("advertisedAddr").SetValue(noahService.AdvertisedAddr)
+		serverCfg.Section("noahService").Key("usePeers").SetValue("false")
+	}
+
+	serverCfg.Section("noahService").Key("pass4SymmKey_minLength").SetValue(strconv.Itoa(noahService.Pass4SymmKeyMinLength))
+	if noahService.ReportIndexDeletion {
+		serverCfg.Section("noahService").Key("reportIndexDeletion").SetValue("true")
+	} else {
+		serverCfg.Section("noahService").Key("reportIndexDeletion").SetValue("false")
+	}
+	serverCfg.Section("noahService").Key("cacheBucketTimeout").SetValue(strconv.Itoa(noahService.CacheBucketTimeout))
+
+	return nil
+}
+
+// GetNoahClientConfiguration prepares the server.conf entries, and returns as a string
+func GetNoahClientConfiguration(ctx context.Context, noahClientConf *enterpriseApi.NoahClient, serverCfg *ini.File) error {
+	if noahClientConf == nil {
+		return nil
+	}
+
+	//timeout.connect = 12
+	//timeout.read = 12
+	//timeout.write = 12
+	//retry_policy = max_count
+	//max_count.max_retries_per_part = 5
+
+	serverCfg.Section("noahClient").Key("max_count.max_retries_per_part").SetValue(strconv.Itoa(noahClientConf.MaxCountMaxRetriesPerPart))
+
+	serverCfg.Section("noahClient").Key("timeout.connect").SetValue(strconv.Itoa(noahClientConf.TimeoutConnect))
+
+	serverCfg.Section("noahClient").Key("timeout.read").SetValue(strconv.Itoa(noahClientConf.TimeoutRead))
+
+	serverCfg.Section("noahClient").Key("timeout.write").SetValue(strconv.Itoa(noahClientConf.TimeoutWrite))
+	serverCfg.Section("noahClient").Key("retry_policy").SetValue(noahClientConf.RetryPolicy)
+
+	return nil
+}
+
+// GetNoahSettingConf prepares the server.conf entries, and returns as a string
+func GetNoahSettingConf(ctx context.Context, noahSettings *enterpriseApi.NoahSettings, serverCfg *ini.File) error {
+	if noahSettings == nil {
+		return nil
+	}
+
+	// [noah_settings]
+	// skip_bucket_reload_period = 0
+	// list_frozen_bucket_period = 0
+
+	serverCfg.Section("noah_settings").Key("skip_bucket_reload_period").SetValue(strconv.Itoa(noahSettings.SkipBucketReloadPeriod))
+	serverCfg.Section("noah_settings").Key("list_frozen_bucket_period").SetValue(strconv.Itoa(noahSettings.ListFrozenBucketPeriod))
+
+	return nil
+}
+
+// GetNoahLatestBucketMapConf prepares the server.conf entries, and returns as a string
+func GetNoahLatestBucketMapConf(ctx context.Context, noahBucketMapConf *enterpriseApi.NoahClientBucketSettings, serverCfg *ini.File) error {
+	if noahBucketMapConf == nil {
+		return nil
+	}
+
+	// [noahClient:get_latest_bucket_map]
+	// retry_policy = max_count
+	// max_count.max_retries_per_part = 4
+	// backoff_strategy = exponential
+	// backoff_strategy.constant.delay = 500ms
+
+	if noahBucketMapConf.RetryPolicy != "" {
+		serverCfg.Section("noahClient:get_latest_bucket_map").Key("retry_policy").SetValue(noahBucketMapConf.RetryPolicy)
+	}
+	if noahBucketMapConf.MaxCountMaxRetriesPerPart != 0 {
+		serverCfg.Section("noahClient:get_latest_bucket_map").Key("max_count.max_retries_per_part").SetValue(strconv.Itoa(noahBucketMapConf.MaxCountMaxRetriesPerPart))
+	}
+	if noahBucketMapConf.BackoffStrategy != "" {
+		serverCfg.Section("noahClient:get_latest_bucket_map").Key("backoff_strategy").SetValue(noahBucketMapConf.BackoffStrategy)
+	}
+	if noahBucketMapConf.BackoffStrategyConstantDelay != 0 {
+		value := fmt.Sprintf("%dms", noahBucketMapConf.BackoffStrategyConstantDelay)
+		serverCfg.Section("noahClient:get_latest_bucket_map").Key("backoff_strategy.constant.delay").SetValue(value)
+	}
+
+	return nil
+}
+
+// GetAuthorizeConf prepares the server.conf entries, and returns as a string
+func GetAuthorizeConf(ctx context.Context, aurhorizeCfg *ini.File) error {
+	aurhorizeCfg.NewSection("capability::run_noah_command")
+	aurhorizeCfg.Section("role_admin").Key("run_noah_command").SetValue("enabled")
+	return nil
+}
+
+// GetNoahLimitsConf prepares the server.conf entries, and returns as a string
+func GetNoahLimitsConf(ctx context.Context, limitsCfg *ini.File) error {
+	limitsCfg.NewSection("search")
+	limitsCfg.Section("search").Key("fetch_remote_search_log").SetValue("disabled")
+	limitsCfg.Section("search").Key("always_include_indexedfield_lispy").SetValue("true")
+
+	limitsCfg.NewSection("search_optimization::replace_stats_cmds_with_tstats")
+	limitsCfg.Section("search_optimization::replace_stats_cmds_with_tstats").Key("enabled").SetValue("true")
+	return nil
+}
+
+// GetNoahOuputsConf prepares the server.conf entries, and returns as a string
+func GetNoahOuputsConf(ctx context.Context, outputsCfg *ini.File) error {
+	outputsCfg.NewSection("indexer_discovery:test")
+	outputsCfg.NewSection("tcpout:test")
+	outputsCfg.Section("tcpout:test").Key("indexerDiscovery").SetValue("test")
+	outputsCfg.NewSection("tcpout")
+	outputsCfg.Section("tcpout").Key("defaultGroup").SetValue("test")
+	return nil
+}
+
 // GetSmartstoreIndexesDefaults fills the indexes.conf default stanza in INI format
-func GetSmartstoreIndexesDefaults(defaults enterpriseApi.IndexConfDefaultsSpec) string {
+func GetSmartstoreIndexesDefaults(ctx context.Context, defaults enterpriseApi.IndexConfDefaultsSpec, indexesCfg *ini.File) string {
 
 	remotePath := "$_index_name"
 
-	indexDefaults := fmt.Sprintf(`[default]
-repFactor = auto
-maxDataSize = auto
-homePath = $SPLUNK_DB/%s/db
-coldPath = $SPLUNK_DB/%s/colddb
-thawedPath = $SPLUNK_DB/%s/thaweddb`,
-		remotePath, remotePath, remotePath)
+	homePathvalue := fmt.Sprintf("$SPLUNK_DB/%s/db", remotePath)
+	coldPathvalue := fmt.Sprintf("$SPLUNK_DB/%s/colddb", remotePath)
+	thawedPathvalue := fmt.Sprintf("$SPLUNK_DB/%s/thaweddb", remotePath)
+
+	indexesCfg.Section("default").Key("repFactor").SetValue("auto")
+	indexesCfg.Section("default").Key("maxDataSize").SetValue("auto")
+	indexesCfg.Section("default").Key("homePath").SetValue(homePathvalue)
+	indexesCfg.Section("default").Key("coldPath").SetValue(coldPathvalue)
+	indexesCfg.Section("default").Key("thawedPath").SetValue(thawedPathvalue)
+
+	if defaults.LastChanceIndex != "" {
+		key := defaults.LastChanceIndex
+		indexesCfg.Section("default").Key("lastChanceIndex").SetValue(defaults.LastChanceIndex)
+
+		db := fmt.Sprintf("$SPLUNK_DB/%s/db", key)
+		colddb := fmt.Sprintf("$SPLUNK_DB/%s/colddb", key)
+		thaweddb := fmt.Sprintf("$SPLUNK_DB/%s/thaweddb", key)
+		indexesCfg.Section(key).Key("lastChanceIndex").SetValue(db)
+		indexesCfg.Section(key).Key("lastChanceIndex").SetValue(colddb)
+		indexesCfg.Section(key).Key("lastChanceIndex").SetValue(thaweddb)
+	}
+
+	if defaults.BucketMerging {
+		indexesCfg.Section("default").Key("bucketMerging").SetValue("true")
+	}
+
+	if defaults.TsidxWritingLevel != 0 {
+		value := fmt.Sprintf("%d", defaults.TsidxWritingLevel)
+		indexesCfg.Section("default").Key("tsidxWritingLevel").SetValue(value)
+	}
+	if defaults.FrozenTimePeriodInSecs != 0 {
+		value := fmt.Sprintf("%d", defaults.FrozenTimePeriodInSecs)
+		indexesCfg.Section("default").Key("frozenTimePeriodInSecs").SetValue(value)
+	}
+	if defaults.MaxHotBuckets != 0 {
+		value := fmt.Sprintf("%d", defaults.MaxHotBuckets)
+		indexesCfg.Section("default").Key("maxHotBuckets").SetValue(value)
+	}
+	
+	if defaults.MaxDataSize != 0 {
+		value := fmt.Sprintf("%d", defaults.MaxDataSize)
+		indexesCfg.Section("default").Key("maxDataSize").SetValue(value)
+	}
+
+	if defaults.MinHotIdleSecsBeforeForceRoll != "" {
+		indexesCfg.Section("default").Key("minHotIdleSecsBeforeForceRoll").SetValue(defaults.MinHotIdleSecsBeforeForceRoll)
+	}
 
 	// Do not change any of the following Sprintf formats(Intentionally indented)
 	if defaults.VolName != "" {
-		//if defaults.VolName != "" && defaults.RemotePath != "" {
-		indexDefaults = fmt.Sprintf(`%s
-remotePath = volume:%s/%s`, indexDefaults, defaults.VolName, remotePath)
+		value := fmt.Sprintf("volume:%s/%s", defaults.VolName, remotePath)
+		indexesCfg.Section("default").Key("remotePath").SetValue(value)
 	}
 
 	if defaults.MaxGlobalDataSizeMB != 0 {
-		indexDefaults = fmt.Sprintf(`%s
-maxGlobalDataSizeMB = %d`, indexDefaults, defaults.MaxGlobalDataSizeMB)
+		value := fmt.Sprintf("%d", defaults.MaxGlobalDataSizeMB)
+		indexesCfg.Section("default").Key("maxGlobalDataSizeMB").SetValue(value)
 	}
 
-	if defaults.MaxGlobalRawDataSizeMB != 0 {
-		indexDefaults = fmt.Sprintf(`%s
-maxGlobalRawDataSizeMB = %d`, indexDefaults, defaults.MaxGlobalRawDataSizeMB)
+	if defaults.EnableOnlineBucketRepair {
+		indexesCfg.Section("default").Key("enableOnlineBucketRepair").SetValue("true")
 	}
 
-	indexDefaults = fmt.Sprintf(`%s
-`, indexDefaults)
-	return indexDefaults
+	if defaults.JournalCompression != "" {
+		indexesCfg.Section("default").Key("journalCompression").SetValue(defaults.JournalCompression)
+	}
+
+	if defaults.MaxHotSpanSecs != 0 {
+		value := fmt.Sprintf("%d", defaults.MaxHotSpanSecs)
+		indexesCfg.Section("default").Key("maxHotSpanSecs").SetValue(value)
+	}
+
+	if defaults.HotBucketStreaming.ReportStatus {
+		indexesCfg.Section("default").Key("hotBucketStreaming.reportStatus").SetValue("true")
+	}
+
+	if defaults.HotBucketStreaming.ReportStatus {
+		indexesCfg.Section("default").Key("hotBucketStreaming.reportStatus").SetValue("true")
+	}
+
+	if defaults.HotBucketStreaming.SendSlices {
+		indexesCfg.Section("default").Key("hotBucketStreaming.sendSlices").SetValue("true")
+	}
+
+	if defaults.HotBucketStreaming.DeleteHotsAfterRestart {
+		indexesCfg.Section("default").Key("hotBucketStreaming.deleteHotsAfterRestart").SetValue("true")
+	}
+
+	if defaults.Metric.StubOutRawdataJournal {
+		indexesCfg.Section("default").Key("metric.stubOutRawdataJournal").SetValue("true")
+	} else {
+		indexesCfg.Section("default").Key("metric.stubOutRawdataJournal").SetValue("false")
+	}
+
+	return ""
 }
 
 // validateProbe validates a generic probe values
-func validateProbe(probe *enterpriseApi.Probe) error {
+func validateProbe(ctx context.Context, probe *enterpriseApi.Probe) error {
 	if probe.InitialDelaySeconds < 0 || probe.TimeoutSeconds < 0 || probe.PeriodSeconds < 0 || probe.FailureThreshold < 0 {
 		return fmt.Errorf("negative values are not allowed. Configured values InitialDelaySeconds = %d, TimeoutSeconds = %d, PeriodSeconds = %d, FailureThreshold = %d", probe.InitialDelaySeconds, probe.TimeoutSeconds, probe.PeriodSeconds, probe.FailureThreshold)
 	}
@@ -1925,7 +2406,7 @@ func validateLivenessProbe(ctx context.Context, cr splcommon.MetaObject, livenes
 		return err
 	}
 
-	err = validateProbe(livenessProbe)
+	err = validateProbe(ctx, livenessProbe)
 	if err != nil {
 		return fmt.Errorf("invalid Liveness Probe config. Reason: %s", err)
 	}
@@ -1960,7 +2441,7 @@ func validateReadinessProbe(ctx context.Context, cr splcommon.MetaObject, readin
 		return err
 	}
 
-	err = validateProbe(readinessProbe)
+	err = validateProbe(ctx, readinessProbe)
 	if err != nil {
 		return fmt.Errorf("invalid Readiness Probe config. Reason: %s", err)
 	}
@@ -1994,7 +2475,7 @@ func validateStartupProbe(ctx context.Context, cr splcommon.MetaObject, startupP
 		return err
 	}
 
-	err = validateProbe(startupProbe)
+	err = validateProbe(ctx, startupProbe)
 	if err != nil {
 		return fmt.Errorf("invalid Startup Probe config. Reason: %s", err)
 	}

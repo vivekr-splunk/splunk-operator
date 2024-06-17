@@ -39,6 +39,8 @@ const (
 type SearchHeadClusterSpec struct {
 	CommonSplunkSpec `json:",inline"`
 
+	AuxilaryClusterManagerRefs []corev1.ObjectReference `json:"auxilaryClusterManagerRefs,omitempty"`
+
 	// Number of search head pods; a search head cluster will be created if > 1
 	Replicas int32 `json:"replicas"`
 
@@ -119,6 +121,9 @@ type SearchHeadClusterStatus struct {
 
 	// Telemetry App installation flag
 	TelAppInstalled bool `json:"telAppInstalled"`
+
+	//NoahStatus Status
+	NoahStatus NoahSpec `json:"noahStatus,omitempty"`
 }
 
 // SearchHeadCluster is the Schema for a Splunk Enterprise search head cluster

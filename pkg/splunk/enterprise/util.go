@@ -16,6 +16,7 @@
 package enterprise
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"time"
 
 	enterpriseApi "github.com/splunk/splunk-operator/api/v4"
+	"gopkg.in/ini.v1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -233,6 +235,35 @@ func ApplySplunkConfig(ctx context.Context, client splcommon.ControllerClient, c
 	return namespaceScopedSecret, nil
 }
 
+// ApplyNoahConfig reconciles the state of Kubernetes Secrets, ConfigMaps and other general settings for Splunk Enterprise instances.
+func ApplyNoahConfig(ctx context.Context, client splcommon.ControllerClient, cr splcommon.MetaObject, spec enterpriseApi.CommonSplunkSpec, instanceType InstanceType) (*corev1.Secret, error) {
+	var err error
+
+	// Creates/updates the namespace scoped "noah-secrets" K8S secret object
+	namespaceScopedSecret, err := splutil.ApplyNamespaceScopedSecretObject(ctx, client, cr.GetNamespace())
+	if err != nil {
+		return nil, err
+	}
+
+	// Set secret owner references
+	err = splutil.SetSecretOwnerRef(ctx, client, namespaceScopedSecret.GetName(), cr)
+	if err != nil {
+		return nil, err
+	}
+
+	// create splunk defaults (for inline config)
+	if spec.Defaults != "" {
+		defaultsMap := getNoahDefaults(cr.GetName(), cr.GetNamespace(), instanceType, spec.Defaults)
+		defaultsMap.SetOwnerReferences(append(defaultsMap.GetOwnerReferences(), splcommon.AsOwner(cr, true)))
+		_, err = splctrl.ApplyConfigMap(ctx, client, defaultsMap)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return namespaceScopedSecret, nil
+}
+
 // getClusterMasterExtraEnv returns extra environment variables used by indexer clusters
 func getClusterMasterExtraEnv(cr splcommon.MetaObject, spec *enterpriseApi.CommonSplunkSpec) []corev1.EnvVar {
 	return []corev1.EnvVar{
@@ -245,6 +276,16 @@ func getClusterMasterExtraEnv(cr splcommon.MetaObject, spec *enterpriseApi.Commo
 
 // getClusterManagerExtraEnv returns extra environment variables used by indexer clusters
 func getClusterManagerExtraEnv(cr splcommon.MetaObject, spec *enterpriseApi.CommonSplunkSpec) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{
+			Name:  splcommon.ClusterManagerURL,
+			Value: GetSplunkServiceName(SplunkClusterManager, cr.GetName(), false),
+		},
+	}
+}
+
+// getNoahClusterExtraEnv returns extra environment variables used by indexer clusters
+func getNoahClusterExtraEnv(cr splcommon.MetaObject, spec *enterpriseApi.CommonSplunkSpec) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{
 			Name:  splcommon.ClusterManagerURL,
@@ -555,45 +596,175 @@ func getAppPackageLocalPath(ctx context.Context, worker *PipelineWorker) string 
 
 // ApplySmartstoreConfigMap creates the configMap with Smartstore config in INI format
 func ApplySmartstoreConfigMap(ctx context.Context, client splcommon.ControllerClient, cr splcommon.MetaObject,
-	smartstore *enterpriseApi.SmartStoreSpec) (*corev1.ConfigMap, bool, error) {
+	smartstore *enterpriseApi.SmartStoreSpec, indexerIni *ini.File, serverIni *ini.File) error {
 
 	var crKind string
-	var configMapDataChanged bool
+
 	crKind = cr.GetObjectKind().GroupVersionKind().Kind
 
 	reqLogger := log.FromContext(ctx)
 	scopedLog := reqLogger.WithName("ApplySmartStoreConfigMap").WithValues("kind", crKind, "name", cr.GetName(), "namespace", cr.GetNamespace())
 
-	// 1. Prepare the indexes.conf entries
-	mapSplunkConfDetails := make(map[string]string)
-
 	// Get the list of volumes in INI format
-	volumesConfIni, err := GetSmartstoreVolumesConfig(ctx, client, cr, smartstore, mapSplunkConfDetails)
+	volumesConfigured, err := GetSmartstoreVolumesConfig(ctx, client, cr, smartstore, indexerIni)
 	if err != nil {
-		return nil, configMapDataChanged, err
+		return err
 	}
 
-	if volumesConfIni == "" {
+	if !volumesConfigured {
 		scopedLog.Info("Volume stanza list is empty")
 	}
 
 	// Get the list of indexes in INI format
-	indexesConfIni := GetSmartstoreIndexesConfig(smartstore.IndexList)
+	indexesConfIni := GetSmartstoreIndexesConfig(ctx, smartstore.IndexList, indexerIni)
 
 	if indexesConfIni == "" {
 		scopedLog.Info("Index stanza list is empty")
-	} else if volumesConfIni == "" {
-		return nil, configMapDataChanged, fmt.Errorf("indexes without Volume configuration is not allowed")
+	} else if !volumesConfigured {
+		return fmt.Errorf("indexes without Volume configuration is not allowed")
 	}
 
-	defaultsConfIni := GetSmartstoreIndexesDefaults(smartstore.Defaults)
+	_ = GetSmartstoreIndexesDefaults(ctx, smartstore.Defaults, indexerIni)
 
-	iniSmartstoreConf := fmt.Sprintf(`%s %s %s`, defaultsConfIni, volumesConfIni, indexesConfIni)
-	mapSplunkConfDetails["indexes.conf"] = iniSmartstoreConf
+	//iniSmartstoreConf := fmt.Sprintf(`%s %s %s`, defaultsConfIni, volumesConfIni, indexesConfIni)
+	var buf bytes.Buffer
+	_, err = indexerIni.WriteTo(&buf)
+	if err != nil {
+		return fmt.Errorf("writing indexer buffer failed")
+	}
 
 	// 2. Prepare server.conf entries
-	iniServerConf := GetServerConfigEntries(&smartstore.DeepCopy().CacheManagerConf)
-	mapSplunkConfDetails["server.conf"] = iniServerConf
+	_ = GetServerConfigEntries(ctx, &smartstore.DeepCopy().CacheManagerConf, serverIni)
+
+	return nil
+}
+
+// ApplyNoahConfiguration creates the configMap with Smartstore config in INI format
+func ApplyNoahConfiguration(ctx context.Context, client splcommon.ControllerClient, cr splcommon.MetaObject,
+	commonSpec *enterpriseApi.CommonSplunkSpec, indexerIni *ini.File, serverIni *ini.File, authorizeIni *ini.File, limitsIni *ini.File, outputsIni *ini.File) error {
+
+	crKind := cr.GetObjectKind().GroupVersionKind().Kind
+
+	reqLogger := log.FromContext(ctx)
+	scopedLog := reqLogger.WithName("ApplyNoahConfiguration").WithValues("kind", crKind, "name", cr.GetName(), "namespace", cr.GetNamespace())
+
+	err := GetNoahClientConfiguration(ctx, &commonSpec.NoahSpec.NoahClient, serverIni)
+	if err != nil {
+		scopedLog.Error(err, "unable to read noah client config", "error", err.Error())
+
+	}
+
+	var instanceID InstanceType
+	switch cr.GetObjectKind().GroupVersionKind().Kind {
+	case "Standalone":
+		instanceID = SplunkStandalone
+	case "LicenseManager":
+		instanceID = SplunkLicenseManager
+	case "IndexerCluster":
+		instanceID = SplunkIndexer
+	case "SearchHeadCluster":
+		instanceID = SplunkDeployer
+	case "ClusterMaster":
+		instanceID = SplunkClusterMaster
+	case "SplunkSearchHead":
+		instanceID = SplunkSearchHead
+	case "MonitoringConsole":
+		instanceID = SplunkMonitoringConsole
+	default:
+		instanceID = ""
+	}
+
+	secret, err := splutil.GetLatestVersionedSecret(ctx, client, cr, cr.GetNamespace(), GetSplunkStatefulsetName(instanceID, cr.GetName()))
+	if err != nil {
+		scopedLog.Error(err, "unable to read latest secret", "error", err.Error())
+	}
+
+	if commonSpec.NoahSpec.NoahService.AdvertisedAddr == "" && !commonSpec.NoahSpec.SearchHead {
+		fqdnName := splcommon.GetServiceFQDN(cr.GetNamespace(), GetSplunkServiceName(instanceID, cr.GetName(), false))
+		commonSpec.NoahSpec.NoahService.AdvertisedAddr = fmt.Sprintf("https://%s:8089", fqdnName)
+	}
+	if commonSpec.NoahSpec.NoahService.Tenant == "" {
+		commonSpec.NoahSpec.NoahService.Tenant = cr.GetNamespace()
+	}
+	err = GetNoahServerConfiguration(ctx, &commonSpec.NoahSpec.NoahService, secret, commonSpec.NoahSpec.SearchHead, serverIni)
+	if err != nil {
+		scopedLog.Error(err, "unable to read noah server config", "error", err.Error())
+	}
+
+	if commonSpec.NoahSpec.SearchHead {
+
+		err = GetNoahSettingConf(ctx, &commonSpec.NoahSpec.NoahSettings, serverIni)
+		if err != nil {
+			scopedLog.Error(err, "unable to read noah setting config", "error", err.Error())
+		}
+
+		err = GetNoahLatestBucketMapConf(ctx, &commonSpec.NoahSpec.NoahClientBucketSettings, serverIni)
+		if err != nil {
+			scopedLog.Error(err, "unable to read noah latest bucket map config", "error", err.Error())
+		}
+
+		err = GetNoahLimitsConf(ctx, limitsIni)
+
+		err = GetNoahOuputsConf(ctx, outputsIni)
+
+	}
+
+	err = GetAuthorizeConf(ctx, authorizeIni)
+	if err != nil {
+		scopedLog.Error(err, "unable to aurhorize config", "error", err.Error())
+
+	}
+
+	return err
+}
+
+func ApplyConfigMapChanges(ctx context.Context, client splcommon.ControllerClient, cr splcommon.MetaObject,
+	indexerIni *ini.File, serverIni *ini.File, authorizeIni *ini.File, limitsIni *ini.File, outputsIni *ini.File) (*corev1.ConfigMap, bool, error) {
+
+	var configMapDataChanged bool
+	var crKind string
+	crKind = cr.GetObjectKind().GroupVersionKind().Kind
+
+	reqLogger := log.FromContext(ctx)
+	scopedLog := reqLogger.WithName("ApplyConfigMapChanges").WithValues("kind", crKind, "name", cr.GetName(), "namespace", cr.GetNamespace())
+
+	// 1. Prepare the indexes.conf entries
+	mapSplunkConfDetails := make(map[string]string)
+
+	var buf bytes.Buffer
+	_, err := indexerIni.WriteTo(&buf)
+	if err != nil {
+		return nil, configMapDataChanged, fmt.Errorf("writing indexer buffer failed")
+	}
+	mapSplunkConfDetails["indexes.conf"] = buf.String()
+
+	var sbuf bytes.Buffer
+	_, err = serverIni.WriteTo(&sbuf)
+	if err != nil {
+		return nil, configMapDataChanged, fmt.Errorf("writing servier config buffer failed")
+	}
+	mapSplunkConfDetails["server.conf"] = sbuf.String()
+
+	var ibuf bytes.Buffer
+	_, err = authorizeIni.WriteTo(&ibuf)
+	if err != nil {
+		return nil, configMapDataChanged, fmt.Errorf("writing authorize config buffer failed")
+	}
+	mapSplunkConfDetails["authorize.conf"] = ibuf.String()
+
+	var obuf bytes.Buffer
+	_, err = outputsIni.WriteTo(&obuf)
+	if err != nil {
+		return nil, configMapDataChanged, fmt.Errorf("writing output config buffer failed")
+	}
+	mapSplunkConfDetails["outputs.conf"] = obuf.String()
+
+	var lbuf bytes.Buffer
+	_, err = limitsIni.WriteTo(&lbuf)
+	if err != nil {
+		return nil, configMapDataChanged, fmt.Errorf("writing limits config buffer failed")
+	}
+	mapSplunkConfDetails["limits.conf"] = lbuf.String()
 
 	// Create smartstore config consisting indexes.conf
 	configMapName := GetSplunkSmartstoreConfigMapName(cr.GetName(), crKind)
@@ -613,7 +784,7 @@ func ApplySmartstoreConfigMap(ctx context.Context, client splcommon.ControllerCl
 	configMapDataChanged, err = splctrl.ApplyConfigMap(ctx, client, SplunkOperatorAppConfigMap)
 	if err != nil {
 		scopedLog.Error(err, "config map create/update failed", "error", err.Error())
-		return nil, configMapDataChanged, err
+		return SplunkOperatorAppConfigMap, configMapDataChanged, err
 	} else if configMapDataChanged {
 		// Create a token to check if the config is really populated to the pod
 		SplunkOperatorAppConfigMap.Data[configToken] = fmt.Sprintf(`%d`, time.Now().Unix())
@@ -633,10 +804,9 @@ func ApplySmartstoreConfigMap(ctx context.Context, client splcommon.ControllerCl
 		}
 		if err != nil {
 			scopedLog.Error(err, "config map update failed", "error", err.Error())
-			return nil, configMapDataChanged, err
+			return SplunkOperatorAppConfigMap, configMapDataChanged, err
 		}
 	}
-
 	return SplunkOperatorAppConfigMap, configMapDataChanged, nil
 }
 

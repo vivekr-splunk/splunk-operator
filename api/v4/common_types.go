@@ -201,6 +201,9 @@ type CommonSplunkSpec struct {
 	// ClusterManagerRef refers to a Splunk Enterprise indexer cluster managed by the operator within Kubernetes
 	ClusterManagerRef corev1.ObjectReference `json:"clusterManagerRef"`
 
+	// NoahClusterRef refers to a Splunk noah cluster managed by the operator within Kubernetes
+	NoahClusterRef corev1.ObjectReference `json:"naohClusterRef"`
+
 	// MonitoringConsoleRef refers to a Splunk Enterprise monitoring console managed by the operator within Kubernetes
 	MonitoringConsoleRef corev1.ObjectReference `json:"monitoringConsoleRef"`
 
@@ -238,6 +241,8 @@ type CommonSplunkSpec struct {
 	// Sets imagePullSecrets if image is being pulled from a private registry.
 	// See https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	NoahSpec NoahSpec `json:"noahSpec,omitempty"`
 }
 
 // StorageClassSpec defines storage class configuration
@@ -269,6 +274,60 @@ type SmartStoreSpec struct {
 	CacheManagerConf CacheManagerSpec `json:"cacheManager,omitempty"`
 }
 
+type NoahSpec struct {
+	SearchHead               bool                     `json:"searchHead,omitempty"`
+	NoahService              NoahService              `json:"noahService,omitempty"`
+	NoahClient               NoahClient               `json:"noahClient,omitempty"`
+	NoahClientBucketSettings NoahClientBucketSettings `json:"noahClientBucketSettings,omitempty"`
+	NoahSettings             NoahSettings             `json:"noahSettings,omitempty"`
+}
+
+// NoahClient
+// [noahClient]
+// timeout.connect = 12
+// timeout.read = 12
+// timeout.write = 12
+// retry_policy = max_count
+// max_count.max_retries_per_part = 5
+type NoahClient struct {
+	TimeoutConnect            int    `json:"timeoutConnect,omitempty" `
+	TimeoutRead               int    `json:"timeoutRead,omitempty"`
+	TimeoutWrite              int    `json:"timeoutWrite,omitempty"`
+	RetryPolicy               string `json:"retryPolicy,omitempty"`
+	MaxCountMaxRetriesPerPart int    `json:"maxCountMaxRetriesPerPart,omitempty"`
+}
+
+// NoahService
+type NoahService struct {
+	// [noahService]
+	Uri                          string `json:"uri,omitempty"`
+	HeartbeatPeriod              int    `json:"heartbeatPeriod,omitempty"`
+	HeartbeatAsPercentageOfLease int    `json:"heartbeatAsPercentageOfLease,omitempty"`
+	Tenant                       string `json:"tenant,omitempty"`
+	RemoteBundle                 string `json:"remoteBundle,omitempty"`
+	Pass4SymmKey                 string `json:"pass4SymmKey,omitempty"`
+	AdvertisedAddr               string `json:"advertiseAddr,omitempty"`
+	Pass4SymmKeyMinLength        int    `json:"pass4SymmKeyMinLength,omitempty"`
+	ReportIndexDeletion          bool   `json:"reportIndexDeletion,omitempty"`
+	CacheBucketTimeout           int    `json:"cacheBucketTimeout,omitempty"`
+}
+
+// NoahClientBucketSetting
+type NoahClientBucketSettings struct {
+	//[noahClient:get_latest_bucket_map]
+	RetryPolicy                  string `json:"retryPolicy,omitempty"`
+	MaxCountMaxRetriesPerPart    int    `json:"maxCountMaxRetriesPerPart,omitempty"`
+	BackoffStrategy              string `json:"backoffStrategy,omitempty"`
+	BackoffStrategyConstantDelay int    `json:"backoffStrategyConstantDelay,omitempty"`
+}
+
+// NoahSettings
+type NoahSettings struct {
+	//[noah_settings]
+	SkipBucketReloadPeriod int `json:"skipBucketReloadPeriod,omitempty"`
+	ListFrozenBucketPeriod int `json:"listFrozenBucketPeriod,omitempty"`
+}
+
 // CacheManagerSpec defines cachemanager specific configuration
 type CacheManagerSpec struct {
 	IndexAndCacheManagerCommonSpec `json:",inline"`
@@ -287,6 +346,8 @@ type CacheManagerSpec struct {
 
 	// Maximum number of buckets that can be uploaded to remote storage in parallel
 	MaxConcurrentUploads uint `json:"maxConcurrentUploads,omitempty"`
+
+	LocalDeleteSummaryMetadataTtl uint `json:"localDeleteSummaryMetadataTtl,omitempty"`
 }
 
 // IndexConfDefaultsSpec defines Splunk indexes.conf global/defaults
@@ -345,8 +406,42 @@ type IndexAndGlobalCommonSpec struct {
 	// MaxGlobalDataSizeMB defines the maximum amount of space for warm and cold buckets of an index
 	MaxGlobalDataSizeMB uint `json:"maxGlobalDataSizeMB,omitempty"`
 
+	LastChanceIndex string `json:"lastChanceIndex,omitempty"`
+
+	BucketMerging bool `json:"bucketMerging,omitempty"`
+
+	TsidxWritingLevel uint `json:"tsidxWritingLevel,omitempty"`
+
+	FrozenTimePeriodInSecs uint `json:"frozenTimePeriodInSecs,omitempty"`
+
+	MaxHotBuckets uint `json:"maxHotBuckets,omitempty"`
+	
+	MaxDataSize uint `json:"maxDataSize,omitempty"`
+
+	MinHotIdleSecsBeforeForceRoll string `json:"minHotIdleSecsBeforeForceRoll,omitempty"`
+
+	EnableOnlineBucketRepair bool `json:"enableOnlineBucketRepair,omitempty"`
+
+	JournalCompression string `json:"journalCompression,omitempty"`
+
+	MaxHotSpanSecs uint `json:"maxHotSpanSecs,omitempty"`
+
 	// MaxGlobalDataSizeMB defines the maximum amount of cumulative space for warm and cold buckets of an index
 	MaxGlobalRawDataSizeMB uint `json:"maxGlobalRawDataSizeMB,omitempty"`
+
+	HotBucketStreaming HotBucketStreaming `json:"hotBucketStreaming,omitempty"`
+
+	Metric Metric `json:"metric,omitempty"`
+}
+
+type HotBucketStreaming struct {
+	ReportStatus           bool `json:"reportStatus,omitempty"`
+	SendSlices             bool `json:"sendSlices,omitempty"`
+	DeleteHotsAfterRestart bool `json:"deleteHotsAfterRestart,omitempty"`
+}
+
+type Metric struct {
+	StubOutRawdataJournal bool `json:"stubOutRawdataJournal,omitempty"`
 }
 
 // IndexAndCacheManagerCommonSpec defines configurations that can be configured at index level or at server level

@@ -1431,6 +1431,112 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+              naohClusterRef:
+                description: NoahClusterRef refers to a Splunk noah cluster managed
+                  by the operator within Kubernetes
+                properties:
+                  apiVersion:
+                    description: API version of the referent.
+                    type: string
+                  fieldPath:
+                    description: 'If referring to a piece of an object instead of
+                      an entire object, this string should contain a valid JSON/Go
+                      field access statement, such as desiredState.manifest.containers[2].
+                      For example, if the object reference is to a container within
+                      a pod, this would take on a value like: "spec.containers{name}"
+                      (where "name" refers to the name of the container that triggered
+                      the event) or if no container name is specified "spec.containers[2]"
+                      (container with index 2 in this pod). This syntax is chosen
+                      only to have some well-defined way of referencing a part of
+                      an object. TODO: this design is not final and this field is
+                      subject to change in the future.'
+                    type: string
+                  kind:
+                    description: 'Kind of the referent. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+                    type: string
+                  name:
+                    description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                    type: string
+                  namespace:
+                    description: 'Namespace of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/'
+                    type: string
+                  resourceVersion:
+                    description: 'Specific resourceVersion to which this reference
+                      is made, if any. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency'
+                    type: string
+                  uid:
+                    description: 'UID of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids'
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              noahSpec:
+                properties:
+                  noahClient:
+                    description: NoahClient [noahClient] timeout.connect = 12 timeout.read
+                      = 12 timeout.write = 12 retry_policy = max_count max_count.max_retries_per_part
+                      = 5
+                    properties:
+                      maxCountMaxRetriesPerPart:
+                        type: integer
+                      retryPolicy:
+                        type: string
+                      timeoutConnect:
+                        type: integer
+                      timeoutRead:
+                        type: integer
+                      timeoutWrite:
+                        type: integer
+                    type: object
+                  noahClientBucketSettings:
+                    description: NoahClientBucketSetting
+                    properties:
+                      backoffStrategy:
+                        type: string
+                      backoffStrategyConstantDelay:
+                        type: integer
+                      maxCountMaxRetriesPerPart:
+                        type: integer
+                      retryPolicy:
+                        description: '[noahClient:get_latest_bucket_map]'
+                        type: string
+                    type: object
+                  noahService:
+                    description: NoahService
+                    properties:
+                      advertiseAddr:
+                        type: string
+                      cacheBucketTimeout:
+                        type: integer
+                      heartbeatAsPercentageOfLease:
+                        type: integer
+                      heartbeatPeriod:
+                        type: integer
+                      pass4SymmKey:
+                        type: string
+                      pass4SymmKeyMinLength:
+                        type: integer
+                      remoteBundle:
+                        type: string
+                      reportIndexDeletion:
+                        type: boolean
+                      tenant:
+                        type: string
+                      uri:
+                        description: '[noahService]'
+                        type: string
+                    type: object
+                  noahSettings:
+                    description: NoahSettings
+                    properties:
+                      listFrozenBucketPeriod:
+                        type: integer
+                      skipBucketReloadPeriod:
+                        description: '[noah_settings]'
+                        type: integer
+                    type: object
+                  searchHead:
+                    type: boolean
+                type: object
               readinessInitialDelaySeconds:
                 description: 'ReadinessInitialDelaySeconds defines initialDelaySeconds(See
                   https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#define-readiness-probes)
@@ -2042,6 +2148,8 @@ spec:
                         description: Time period relative to the bucket's age, during
                           which the bucket is protected from cache eviction
                         type: integer
+                      localDeleteSummaryMetadataTtl:
+                        type: integer
                       maxCacheSize:
                         description: Max cache size per partition
                         type: integer
@@ -2057,6 +2165,27 @@ spec:
                   defaults:
                     description: Default configuration for indexes
                     properties:
+                      bucketMerging:
+                        type: boolean
+                      enableOnlineBucketRepair:
+                        type: boolean
+                      frozenTimePeriodInSecs:
+                        type: integer
+                      hotBucketStreaming:
+                        properties:
+                          deleteHotsAfterRestart:
+                            type: boolean
+                          reportStatus:
+                            type: boolean
+                          sendSlices:
+                            type: boolean
+                        type: object
+                      journalCompression:
+                        type: string
+                      lastChanceIndex:
+                        type: string
+                      maxDataSize:
+                        type: integer
                       maxGlobalDataSizeMB:
                         description: MaxGlobalDataSizeMB defines the maximum amount
                           of space for warm and cold buckets of an index
@@ -2064,6 +2193,19 @@ spec:
                       maxGlobalRawDataSizeMB:
                         description: MaxGlobalDataSizeMB defines the maximum amount
                           of cumulative space for warm and cold buckets of an index
+                        type: integer
+                      maxHotBuckets:
+                        type: integer
+                      maxHotSpanSecs:
+                        type: integer
+                      metric:
+                        properties:
+                          stubOutRawdataJournal:
+                            type: boolean
+                        type: object
+                      minHotIdleSecsBeforeForceRoll:
+                        type: string
+                      tsidxWritingLevel:
                         type: integer
                       volumeName:
                         description: Remote Volume name
@@ -2075,6 +2217,21 @@ spec:
                       description: IndexSpec defines Splunk index name and storage
                         path
                       properties:
+                        bucketMerging:
+                          type: boolean
+                        enableOnlineBucketRepair:
+                          type: boolean
+                        frozenTimePeriodInSecs:
+                          type: integer
+                        hotBucketStreaming:
+                          properties:
+                            deleteHotsAfterRestart:
+                              type: boolean
+                            reportStatus:
+                              type: boolean
+                            sendSlices:
+                              type: boolean
+                          type: object
                         hotlistBloomFilterRecencyHours:
                           description: Time period relative to the bucket's age, during
                             which the bloom filter file is protected from cache eviction
@@ -2082,6 +2239,12 @@ spec:
                         hotlistRecencySecs:
                           description: Time period relative to the bucket's age, during
                             which the bucket is protected from cache eviction
+                          type: integer
+                        journalCompression:
+                          type: string
+                        lastChanceIndex:
+                          type: string
+                        maxDataSize:
                           type: integer
                         maxGlobalDataSizeMB:
                           description: MaxGlobalDataSizeMB defines the maximum amount
@@ -2091,6 +2254,17 @@ spec:
                           description: MaxGlobalDataSizeMB defines the maximum amount
                             of cumulative space for warm and cold buckets of an index
                           type: integer
+                        maxHotBuckets:
+                          type: integer
+                        maxHotSpanSecs:
+                          type: integer
+                        metric:
+                          properties:
+                            stubOutRawdataJournal:
+                              type: boolean
+                          type: object
+                        minHotIdleSecsBeforeForceRoll:
+                          type: string
                         name:
                           description: Splunk index name
                           type: string
@@ -2098,6 +2272,8 @@ spec:
                           description: Index location relative to the remote volume
                             path
                           type: string
+                        tsidxWritingLevel:
+                          type: integer
                         volumeName:
                           description: Remote Volume name
                           type: string
@@ -4275,6 +4451,8 @@ spec:
                         description: Time period relative to the bucket's age, during
                           which the bucket is protected from cache eviction
                         type: integer
+                      localDeleteSummaryMetadataTtl:
+                        type: integer
                       maxCacheSize:
                         description: Max cache size per partition
                         type: integer
@@ -4290,6 +4468,27 @@ spec:
                   defaults:
                     description: Default configuration for indexes
                     properties:
+                      bucketMerging:
+                        type: boolean
+                      enableOnlineBucketRepair:
+                        type: boolean
+                      frozenTimePeriodInSecs:
+                        type: integer
+                      hotBucketStreaming:
+                        properties:
+                          deleteHotsAfterRestart:
+                            type: boolean
+                          reportStatus:
+                            type: boolean
+                          sendSlices:
+                            type: boolean
+                        type: object
+                      journalCompression:
+                        type: string
+                      lastChanceIndex:
+                        type: string
+                      maxDataSize:
+                        type: integer
                       maxGlobalDataSizeMB:
                         description: MaxGlobalDataSizeMB defines the maximum amount
                           of space for warm and cold buckets of an index
@@ -4297,6 +4496,19 @@ spec:
                       maxGlobalRawDataSizeMB:
                         description: MaxGlobalDataSizeMB defines the maximum amount
                           of cumulative space for warm and cold buckets of an index
+                        type: integer
+                      maxHotBuckets:
+                        type: integer
+                      maxHotSpanSecs:
+                        type: integer
+                      metric:
+                        properties:
+                          stubOutRawdataJournal:
+                            type: boolean
+                        type: object
+                      minHotIdleSecsBeforeForceRoll:
+                        type: string
+                      tsidxWritingLevel:
                         type: integer
                       volumeName:
                         description: Remote Volume name
@@ -4308,6 +4520,21 @@ spec:
                       description: IndexSpec defines Splunk index name and storage
                         path
                       properties:
+                        bucketMerging:
+                          type: boolean
+                        enableOnlineBucketRepair:
+                          type: boolean
+                        frozenTimePeriodInSecs:
+                          type: integer
+                        hotBucketStreaming:
+                          properties:
+                            deleteHotsAfterRestart:
+                              type: boolean
+                            reportStatus:
+                              type: boolean
+                            sendSlices:
+                              type: boolean
+                          type: object
                         hotlistBloomFilterRecencyHours:
                           description: Time period relative to the bucket's age, during
                             which the bloom filter file is protected from cache eviction
@@ -4315,6 +4542,12 @@ spec:
                         hotlistRecencySecs:
                           description: Time period relative to the bucket's age, during
                             which the bucket is protected from cache eviction
+                          type: integer
+                        journalCompression:
+                          type: string
+                        lastChanceIndex:
+                          type: string
+                        maxDataSize:
                           type: integer
                         maxGlobalDataSizeMB:
                           description: MaxGlobalDataSizeMB defines the maximum amount
@@ -4324,6 +4557,17 @@ spec:
                           description: MaxGlobalDataSizeMB defines the maximum amount
                             of cumulative space for warm and cold buckets of an index
                           type: integer
+                        maxHotBuckets:
+                          type: integer
+                        maxHotSpanSecs:
+                          type: integer
+                        metric:
+                          properties:
+                            stubOutRawdataJournal:
+                              type: boolean
+                          type: object
+                        minHotIdleSecsBeforeForceRoll:
+                          type: string
                         name:
                           description: Splunk index name
                           type: string
@@ -4331,6 +4575,8 @@ spec:
                           description: Index location relative to the remote volume
                             path
                           type: string
+                        tsidxWritingLevel:
+                          type: integer
                         volumeName:
                           description: Remote Volume name
                           type: string
@@ -5797,6 +6043,112 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+              naohClusterRef:
+                description: NoahClusterRef refers to a Splunk noah cluster managed
+                  by the operator within Kubernetes
+                properties:
+                  apiVersion:
+                    description: API version of the referent.
+                    type: string
+                  fieldPath:
+                    description: 'If referring to a piece of an object instead of
+                      an entire object, this string should contain a valid JSON/Go
+                      field access statement, such as desiredState.manifest.containers[2].
+                      For example, if the object reference is to a container within
+                      a pod, this would take on a value like: "spec.containers{name}"
+                      (where "name" refers to the name of the container that triggered
+                      the event) or if no container name is specified "spec.containers[2]"
+                      (container with index 2 in this pod). This syntax is chosen
+                      only to have some well-defined way of referencing a part of
+                      an object. TODO: this design is not final and this field is
+                      subject to change in the future.'
+                    type: string
+                  kind:
+                    description: 'Kind of the referent. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+                    type: string
+                  name:
+                    description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                    type: string
+                  namespace:
+                    description: 'Namespace of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/'
+                    type: string
+                  resourceVersion:
+                    description: 'Specific resourceVersion to which this reference
+                      is made, if any. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency'
+                    type: string
+                  uid:
+                    description: 'UID of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids'
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              noahSpec:
+                properties:
+                  noahClient:
+                    description: NoahClient [noahClient] timeout.connect = 12 timeout.read
+                      = 12 timeout.write = 12 retry_policy = max_count max_count.max_retries_per_part
+                      = 5
+                    properties:
+                      maxCountMaxRetriesPerPart:
+                        type: integer
+                      retryPolicy:
+                        type: string
+                      timeoutConnect:
+                        type: integer
+                      timeoutRead:
+                        type: integer
+                      timeoutWrite:
+                        type: integer
+                    type: object
+                  noahClientBucketSettings:
+                    description: NoahClientBucketSetting
+                    properties:
+                      backoffStrategy:
+                        type: string
+                      backoffStrategyConstantDelay:
+                        type: integer
+                      maxCountMaxRetriesPerPart:
+                        type: integer
+                      retryPolicy:
+                        description: '[noahClient:get_latest_bucket_map]'
+                        type: string
+                    type: object
+                  noahService:
+                    description: NoahService
+                    properties:
+                      advertiseAddr:
+                        type: string
+                      cacheBucketTimeout:
+                        type: integer
+                      heartbeatAsPercentageOfLease:
+                        type: integer
+                      heartbeatPeriod:
+                        type: integer
+                      pass4SymmKey:
+                        type: string
+                      pass4SymmKeyMinLength:
+                        type: integer
+                      remoteBundle:
+                        type: string
+                      reportIndexDeletion:
+                        type: boolean
+                      tenant:
+                        type: string
+                      uri:
+                        description: '[noahService]'
+                        type: string
+                    type: object
+                  noahSettings:
+                    description: NoahSettings
+                    properties:
+                      listFrozenBucketPeriod:
+                        type: integer
+                      skipBucketReloadPeriod:
+                        description: '[noah_settings]'
+                        type: integer
+                    type: object
+                  searchHead:
+                    type: boolean
+                type: object
               readinessInitialDelaySeconds:
                 description: 'ReadinessInitialDelaySeconds defines initialDelaySeconds(See
                   https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#define-readiness-probes)
@@ -6408,6 +6760,8 @@ spec:
                         description: Time period relative to the bucket's age, during
                           which the bucket is protected from cache eviction
                         type: integer
+                      localDeleteSummaryMetadataTtl:
+                        type: integer
                       maxCacheSize:
                         description: Max cache size per partition
                         type: integer
@@ -6423,6 +6777,27 @@ spec:
                   defaults:
                     description: Default configuration for indexes
                     properties:
+                      bucketMerging:
+                        type: boolean
+                      enableOnlineBucketRepair:
+                        type: boolean
+                      frozenTimePeriodInSecs:
+                        type: integer
+                      hotBucketStreaming:
+                        properties:
+                          deleteHotsAfterRestart:
+                            type: boolean
+                          reportStatus:
+                            type: boolean
+                          sendSlices:
+                            type: boolean
+                        type: object
+                      journalCompression:
+                        type: string
+                      lastChanceIndex:
+                        type: string
+                      maxDataSize:
+                        type: integer
                       maxGlobalDataSizeMB:
                         description: MaxGlobalDataSizeMB defines the maximum amount
                           of space for warm and cold buckets of an index
@@ -6430,6 +6805,19 @@ spec:
                       maxGlobalRawDataSizeMB:
                         description: MaxGlobalDataSizeMB defines the maximum amount
                           of cumulative space for warm and cold buckets of an index
+                        type: integer
+                      maxHotBuckets:
+                        type: integer
+                      maxHotSpanSecs:
+                        type: integer
+                      metric:
+                        properties:
+                          stubOutRawdataJournal:
+                            type: boolean
+                        type: object
+                      minHotIdleSecsBeforeForceRoll:
+                        type: string
+                      tsidxWritingLevel:
                         type: integer
                       volumeName:
                         description: Remote Volume name
@@ -6441,6 +6829,21 @@ spec:
                       description: IndexSpec defines Splunk index name and storage
                         path
                       properties:
+                        bucketMerging:
+                          type: boolean
+                        enableOnlineBucketRepair:
+                          type: boolean
+                        frozenTimePeriodInSecs:
+                          type: integer
+                        hotBucketStreaming:
+                          properties:
+                            deleteHotsAfterRestart:
+                              type: boolean
+                            reportStatus:
+                              type: boolean
+                            sendSlices:
+                              type: boolean
+                          type: object
                         hotlistBloomFilterRecencyHours:
                           description: Time period relative to the bucket's age, during
                             which the bloom filter file is protected from cache eviction
@@ -6448,6 +6851,12 @@ spec:
                         hotlistRecencySecs:
                           description: Time period relative to the bucket's age, during
                             which the bucket is protected from cache eviction
+                          type: integer
+                        journalCompression:
+                          type: string
+                        lastChanceIndex:
+                          type: string
+                        maxDataSize:
                           type: integer
                         maxGlobalDataSizeMB:
                           description: MaxGlobalDataSizeMB defines the maximum amount
@@ -6457,6 +6866,17 @@ spec:
                           description: MaxGlobalDataSizeMB defines the maximum amount
                             of cumulative space for warm and cold buckets of an index
                           type: integer
+                        maxHotBuckets:
+                          type: integer
+                        maxHotSpanSecs:
+                          type: integer
+                        metric:
+                          properties:
+                            stubOutRawdataJournal:
+                              type: boolean
+                          type: object
+                        minHotIdleSecsBeforeForceRoll:
+                          type: string
                         name:
                           description: Splunk index name
                           type: string
@@ -6464,6 +6884,8 @@ spec:
                           description: Index location relative to the remote volume
                             path
                           type: string
+                        tsidxWritingLevel:
+                          type: integer
                         volumeName:
                           description: Remote Volume name
                           type: string
@@ -8592,6 +9014,75 @@ spec:
                     description: App Framework version info for future use
                     type: integer
                 type: object
+              noahStatus:
+                description: NoahStatus Status
+                properties:
+                  noahClient:
+                    description: NoahClient [noahClient] timeout.connect = 12 timeout.read
+                      = 12 timeout.write = 12 retry_policy = max_count max_count.max_retries_per_part
+                      = 5
+                    properties:
+                      maxCountMaxRetriesPerPart:
+                        type: integer
+                      retryPolicy:
+                        type: string
+                      timeoutConnect:
+                        type: integer
+                      timeoutRead:
+                        type: integer
+                      timeoutWrite:
+                        type: integer
+                    type: object
+                  noahClientBucketSettings:
+                    description: NoahClientBucketSetting
+                    properties:
+                      backoffStrategy:
+                        type: string
+                      backoffStrategyConstantDelay:
+                        type: integer
+                      maxCountMaxRetriesPerPart:
+                        type: integer
+                      retryPolicy:
+                        description: '[noahClient:get_latest_bucket_map]'
+                        type: string
+                    type: object
+                  noahService:
+                    description: NoahService
+                    properties:
+                      advertiseAddr:
+                        type: string
+                      cacheBucketTimeout:
+                        type: integer
+                      heartbeatAsPercentageOfLease:
+                        type: integer
+                      heartbeatPeriod:
+                        type: integer
+                      pass4SymmKey:
+                        type: string
+                      pass4SymmKeyMinLength:
+                        type: integer
+                      remoteBundle:
+                        type: string
+                      reportIndexDeletion:
+                        type: boolean
+                      tenant:
+                        type: string
+                      uri:
+                        description: '[noahService]'
+                        type: string
+                    type: object
+                  noahSettings:
+                    description: NoahSettings
+                    properties:
+                      listFrozenBucketPeriod:
+                        type: integer
+                      skipBucketReloadPeriod:
+                        description: '[noah_settings]'
+                        type: integer
+                    type: object
+                  searchHead:
+                    type: boolean
+                type: object
               phase:
                 description: current phase of the standalone instances
                 enum:
@@ -8641,6 +9132,8 @@ spec:
                         description: Time period relative to the bucket's age, during
                           which the bucket is protected from cache eviction
                         type: integer
+                      localDeleteSummaryMetadataTtl:
+                        type: integer
                       maxCacheSize:
                         description: Max cache size per partition
                         type: integer
@@ -8656,6 +9149,27 @@ spec:
                   defaults:
                     description: Default configuration for indexes
                     properties:
+                      bucketMerging:
+                        type: boolean
+                      enableOnlineBucketRepair:
+                        type: boolean
+                      frozenTimePeriodInSecs:
+                        type: integer
+                      hotBucketStreaming:
+                        properties:
+                          deleteHotsAfterRestart:
+                            type: boolean
+                          reportStatus:
+                            type: boolean
+                          sendSlices:
+                            type: boolean
+                        type: object
+                      journalCompression:
+                        type: string
+                      lastChanceIndex:
+                        type: string
+                      maxDataSize:
+                        type: integer
                       maxGlobalDataSizeMB:
                         description: MaxGlobalDataSizeMB defines the maximum amount
                           of space for warm and cold buckets of an index
@@ -8663,6 +9177,19 @@ spec:
                       maxGlobalRawDataSizeMB:
                         description: MaxGlobalDataSizeMB defines the maximum amount
                           of cumulative space for warm and cold buckets of an index
+                        type: integer
+                      maxHotBuckets:
+                        type: integer
+                      maxHotSpanSecs:
+                        type: integer
+                      metric:
+                        properties:
+                          stubOutRawdataJournal:
+                            type: boolean
+                        type: object
+                      minHotIdleSecsBeforeForceRoll:
+                        type: string
+                      tsidxWritingLevel:
                         type: integer
                       volumeName:
                         description: Remote Volume name
@@ -8674,6 +9201,21 @@ spec:
                       description: IndexSpec defines Splunk index name and storage
                         path
                       properties:
+                        bucketMerging:
+                          type: boolean
+                        enableOnlineBucketRepair:
+                          type: boolean
+                        frozenTimePeriodInSecs:
+                          type: integer
+                        hotBucketStreaming:
+                          properties:
+                            deleteHotsAfterRestart:
+                              type: boolean
+                            reportStatus:
+                              type: boolean
+                            sendSlices:
+                              type: boolean
+                          type: object
                         hotlistBloomFilterRecencyHours:
                           description: Time period relative to the bucket's age, during
                             which the bloom filter file is protected from cache eviction
@@ -8681,6 +9223,12 @@ spec:
                         hotlistRecencySecs:
                           description: Time period relative to the bucket's age, during
                             which the bucket is protected from cache eviction
+                          type: integer
+                        journalCompression:
+                          type: string
+                        lastChanceIndex:
+                          type: string
+                        maxDataSize:
                           type: integer
                         maxGlobalDataSizeMB:
                           description: MaxGlobalDataSizeMB defines the maximum amount
@@ -8690,6 +9238,17 @@ spec:
                           description: MaxGlobalDataSizeMB defines the maximum amount
                             of cumulative space for warm and cold buckets of an index
                           type: integer
+                        maxHotBuckets:
+                          type: integer
+                        maxHotSpanSecs:
+                          type: integer
+                        metric:
+                          properties:
+                            stubOutRawdataJournal:
+                              type: boolean
+                          type: object
+                        minHotIdleSecsBeforeForceRoll:
+                          type: string
                         name:
                           description: Splunk index name
                           type: string
@@ -8697,6 +9256,8 @@ spec:
                           description: Index location relative to the remote volume
                             path
                           type: string
+                        tsidxWritingLevel:
+                          type: integer
                         volumeName:
                           description: Remote Volume name
                           type: string
