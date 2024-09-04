@@ -42,6 +42,8 @@ type GenAIDeploymentSpec struct {
 
 // SaisServiceSpec defines the configuration for a single SaisService deployment
 type SaisServiceSpec struct {
+	SecretRef                 corev1.LocalObjectReference       `json:"secretRef,omitempty"`                 // Secret reference for sensitive data
+	ConfigMapRef              corev1.LocalObjectReference       `json:"configMapRef,omitempty"`              // ConfigMap reference for environment variables
 	Image                     string                            `json:"image"`                               // Container image for the service
 	Resources                 corev1.ResourceRequirements       `json:"resources"`                           // Resource requirements for the container (CPU, Memory)
 	Volume                    corev1.Volume                     `json:"volume,omitempty"`                    // Volume specifications using corev1.Volume

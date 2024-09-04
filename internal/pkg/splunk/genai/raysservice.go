@@ -130,6 +130,26 @@ func (r *rayServiceReconcilerImpl) ReconcileRayCluster(ctx context.Context) erro
 			return fmt.Errorf("failed to update RayCluster: %w", err)
 		}
 	}
+
+	// Get the latest RayCluster to update the status
+	latestRayCluster := &rayv1.RayCluster{}
+	if err := r.Get(ctx, client.ObjectKey{Name: rayCluster.Name, Namespace: rayCluster.Namespace}, latestRayCluster); err != nil {
+		return fmt.Errorf("failed to get latest RayCluster: %w", err)
+	}
+
+	// Update the status based on the current status of RayCluster
+	status := enterpriseApi.RayClusterStatus{}
+	if latestRayCluster.Status.State == rayv1.AllPodRunningAndReadyFirstTime {
+		status.State = "Running"
+		status.Message = "RayService is running successfully"
+	} else if latestRayCluster.Status.State == rayv1.RayClusterPodsProvisioning {
+		status.State = "Provisioning"
+		status.Message = "Provisioning RayCluster pods"
+	} else {
+		status.State = "Unknown"
+		status.Message = "Unknown state of RayCluster"
+	}
+
 	return nil
 }
 

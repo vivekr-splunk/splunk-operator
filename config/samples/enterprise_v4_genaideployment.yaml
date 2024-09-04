@@ -1,3 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sais-service-config
+  labels:
+    app: sais-service
+data:
+  IAC_URL: "auth.playground.scs.splunk.com"
+  API_GATEWAY_URL: "api.playground.scs.splunk.com"
+  PLATFORM_URL: "ml-platform-cyclops.dev.svc.splunk8s.io"
+  TELEMETRY_URL: "https://telemetry-splkmobile.kube-bridger"
+  TELEMETRY_ENV: "local"
+  TELEMETRY_REGION: "region-iad10"
+  ENABLE_AUTHZ: "false"
+  AUTH_PROVIDER: "scp"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sais-secret
+  labels:
+    app.kubernetes.io/name: sais
+    app.kubernetes.io/managed-by: sok
+type: Opaque
+data:
+  username: YWRtaW4=  # Base64 encoded 'admin'
+  password: c2VjcmV0  # Base64 encoded 'secret'
 ---
 apiVersion: v1
 kind: Secret
@@ -22,6 +49,10 @@ spec:
   # TODO(user): Add fields here
   serviceAccount: genai-controller-manager
   saisService:
+    secretRef: 
+      name: sais-secret
+    configMapRef: 
+      name: sais-service-config
     image:  "vivekrsplunk/saia-api:0.0.1"
     resources:
       limits:

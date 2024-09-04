@@ -240,19 +240,49 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 	}
 
 	// Define the desired environment variables
-	desiredEnvVars := []corev1.EnvVar{
-		{Name: "ENABLE_AUTHZ", Value: "false"},                                      //FIXME
-		{Name: "IAC_URL", Value: "auth.playground.scs.splunk.com"},                  //FIXME
-		{Name: "API_GATEWAY_URL", Value: "api.playground.scs.splunk.com"},           //FIXME
-		{Name: "PLATFORM_URL", Value: "ml-platform-cyclops.dev.svc.splunk8s.io"},    //FIXME
-		{Name: "TELEMETRY_URL", Value: "https://telemetry-splkmobile.kube-bridger"}, //FIXME
-		{Name: "TELEMETRY_ENV", Value: "local"},                                     //FIXME
-		{Name: "TELEMETRY_REGION", Value: "us-west-2"},                              //FIXME
-		{Name: "ENABLE_AUTHZ", Value: "false"},                                      //FIXME
-		{Name: "AUTH_PROVIDER", Value: "scp"},                                       //FIXME
-		{Name: "S3_BUCKET", Value: s3Bucket	},                            //FIXME
+	configMapEnvVars := []corev1.EnvVar{
+		{Name: "IAC_URL", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "IAC_URL",
+			}}},
+		{Name: "API_GATEWAY_URL", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "API_GATEWAY_URL",
+			}}},
+		{Name: "PLATFORM_URL", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "PLATFORM_URL",
+			}}},
+		{Name: "TELEMETRY_URL", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "TELEMETRY_URL",
+			}}},
+		{Name: "TELEMETRY_ENV", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "TELEMETRY_ENV",
+			}}},
+		{Name: "TELEMETRY_REGION", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "TELEMETRY_REGION",
+			}}},
+		{Name: "ENABLE_AUTHZ", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "ENABLE_AUTHZ",
+			}}},
+		{Name: "AUTH_PROVIDER", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "AUTH_PROVIDER",
+			}}},
+		{Name: "S3_BUCKET", Value: s3Bucket}, //FIXME
 	}
-
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -280,7 +310,7 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 							Name:      "sais-container",
 							Image:     r.genAIDeployment.Spec.SaisService.Image,
 							Resources: r.genAIDeployment.Spec.SaisService.Resources,
-							Env:   desiredEnvVars, // Use the desired environment variables
+							Env:       configMapEnvVars, // Use the desired environment variables
 							/*VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      r.genAIDeployment.Spec.SaisService.Volume.Name,
@@ -323,10 +353,10 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 		existingDeployment.Spec.Template.Spec.ServiceAccountName = r.genAIDeployment.Spec.ServiceAccount
 		updated = true
 	}
-	// Check for differences in environment variables
-	if !envVarsEqual(existingDeployment.Spec.Template.Spec.Containers[0].Env, desiredEnvVars) {
-		// Update the environment variables in the existing Deployment
-		existingDeployment.Spec.Template.Spec.Containers[0].Env = desiredEnvVars
+	// Check for changes in environment variables or secret volume
+	if !envVarsEqual(existingDeployment.Spec.Template.Spec.Containers[0].Env, configMapEnvVars) {
+		// Update environment variables
+		existingDeployment.Spec.Template.Spec.Containers[0].Env = configMapEnvVars
 		updated = true
 	}
 
@@ -403,7 +433,6 @@ func getServiceAccountName(serviceAccount string) string {
 	}
 	return ""
 }
-
 
 // Helper function to compare environment variables
 func envVarsEqual(existingEnvVars, desiredEnvVars []corev1.EnvVar) bool {

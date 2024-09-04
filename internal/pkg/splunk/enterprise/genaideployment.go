@@ -43,7 +43,7 @@ type GenAIDeploymentReconciler struct {
 }
 
 // ApplyGenAIDeployment reconciles the state of a Splunk Enterprise cluster manager.
-func ApplyGenAIDeployment(ctx context.Context, client splcommon.ControllerClient, eventRecorder record.EventRecorder , cr *enterpriseApi.GenAIDeployment) (reconcile.Result, error) {
+func ApplyGenAIDeployment(ctx context.Context, client splcommon.ControllerClient, eventRecorder record.EventRecorder, cr *enterpriseApi.GenAIDeployment) (reconcile.Result, error) {
 	g := &GenAIDeploymentReconciler{Client: client, Scheme: client.Scheme(), eventRecorder: eventRecorder}
 	return g.Reconcile(ctx, cr)
 }
