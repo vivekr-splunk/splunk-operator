@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"github.com/pkg/errors"
+	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	enterpriseApi "github.com/vivekrsplunk/splunk-operator/api/v4"
 	common "github.com/vivekrsplunk/splunk-operator/internal/controller/common"
 	enterprise "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/enterprise"
@@ -48,6 +49,8 @@ type GenAIDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=enterprise.splunk.com,resources=genaideployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=enterprise.splunk.com,resources=genaideployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list
+// +kubebuilder:rbac:groups=ray.io,resources=rayclusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=ray.io,resources=rayclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services/finalizers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
@@ -163,6 +166,6 @@ func (r *GenAIDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: enterpriseApi.TotalWorker,
 		}).
-		//Owns(&rayv1.RayCluster{}).
+		Owns(&rayv1.RayCluster{}).
 		Complete(r)
 }
