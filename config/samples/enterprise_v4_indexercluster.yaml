@@ -1,0 +1,8 @@
+apiVersion: enterprise.splunk.com/v4
+kind: IndexerCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: splunk-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: indexercluster-sample
+spec: {} 

@@ -1,0 +1,9 @@
+apiVersion: enterprise.splunk.com/v3
+kind: Standalone
+metadata:
+  labels:
+    app.kubernetes.io/name: splunk-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: standalone-sample
+spec:
+  # TODO(user): Add fields here
