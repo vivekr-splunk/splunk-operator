@@ -3,13 +3,14 @@ package genai
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 
 	enterpriseApi "github.com/vivekrsplunk/splunk-operator/api/v4"
-	splutil "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/util"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -27,11 +28,11 @@ type SaisServiceReconciler interface {
 type saisServiceReconcilerImpl struct {
 	client.Client
 	genAIDeployment *enterpriseApi.GenAIDeployment
-	eventRecorder   *splutil.K8EventPublisher
+	eventRecorder   record.EventRecorder
 }
 
 // NewSaisServiceReconciler creates a new instance of SaisServiceReconciler.
-func NewSaisServiceReconciler(c client.Client, genAIDeployment *enterpriseApi.GenAIDeployment, eventRecorder *splutil.K8EventPublisher) SaisServiceReconciler {
+func NewSaisServiceReconciler(c client.Client, genAIDeployment *enterpriseApi.GenAIDeployment, eventRecorder record.EventRecorder) SaisServiceReconciler {
 	return &saisServiceReconcilerImpl{
 		Client:          c,
 		genAIDeployment: genAIDeployment,
@@ -79,7 +80,7 @@ func (r *saisServiceReconcilerImpl) Reconcile(ctx context.Context) error {
 	}
 
 	// Write to event recorder
-	r.eventRecorder.Warning(ctx, "Reconciliation", "SaisService reconciliation completed successfully")
+	r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "Reconciliation", "SaisService reconciliation completed successfully")
 
 	// If all reconciliations succeed, update the status to Running
 	status.Status = "Running"
@@ -110,7 +111,7 @@ func (r *saisServiceReconcilerImpl) ReconcileServiceAccount(ctx context.Context)
 		}
 
 		if err := r.Create(ctx, serviceAccount); err != nil {
-			r.eventRecorder.Warning(ctx, "ReconciliationError", fmt.Sprintf("Failed to create ServiceAccount: %v", err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to create ServiceAccount: %v", err))
 			return fmt.Errorf("failed to create ServiceAccount: %w", err)
 		}
 	}
@@ -139,13 +140,13 @@ func (r *saisServiceReconcilerImpl) ReconcileSecret(ctx context.Context) error {
 		}
 
 		if err := r.Create(ctx, secret); err != nil {
-			r.eventRecorder.Warning(ctx, "ReconciliationError", fmt.Sprintf("Failed to create Secret: %v", err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to create Secret: %v", err))
 			return fmt.Errorf("failed to create Secret: %w", err)
 		}
 	} else if !reflect.DeepEqual(secret.Data, existingSecret.Data) {
 		existingSecret.Data = secret.Data
 		if err := r.Update(ctx, existingSecret); err != nil {
-			r.eventRecorder.Warning(ctx, "ReconciliationError", fmt.Sprintf("Failed to update Secret: %v", err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to update Secret: %v", err))
 			return fmt.Errorf("failed to update Secret: %w", err)
 		}
 	}
@@ -174,13 +175,13 @@ func (r *saisServiceReconcilerImpl) ReconcileConfigMap(ctx context.Context) erro
 		}
 
 		if err := r.Create(ctx, configMap); err != nil {
-			r.eventRecorder.Warning(ctx, "ReconciliationError", fmt.Sprintf("Failed to create ConfigMap: %v", err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to create ConfigMap: %v", err))
 			return fmt.Errorf("failed to create ConfigMap: %w", err)
 		}
 	} else if !reflect.DeepEqual(configMap.Data, existingConfigMap.Data) {
 		existingConfigMap.Data = configMap.Data
 		if err := r.Update(ctx, existingConfigMap); err != nil {
-			r.eventRecorder.Warning(ctx, "ReconciliationError", fmt.Sprintf("Failed to update ConfigMap: %v", err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to update ConfigMap: %v", err))
 			return fmt.Errorf("failed to update ConfigMap: %w", err)
 		}
 	}
@@ -221,13 +222,37 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 			Effect:   corev1.TaintEffectNoSchedule,
 		})
 	}
-	annotaions := map[string]string{
-		"splunk8s.io.vault/init-container": "true",
+	// Read the AWS_ROLE_ARN from the environment
+	awsRoleArn := os.Getenv("AWS_ROLE_ARN")
+
+	s3Bucket := r.genAIDeployment.Spec.Bucket.Path
+
+	annotations := map[string]string{
+		"splunk8s.io.vault/init-container": "false",
 		"prometheus.io/port":               "8080",
 		"prometheus.io/path":               "/metrics",
 		"prometheus.io/scheme":             "http",
-		"iam.amazonaws.com/role":           "arn:aws:iam::1.2234567e+07:role/ai-assistant-role-0",
 	}
+
+	// Set the "iam.amazonaws.com/role" only if AWS_ROLE_ARN is not empty
+	if awsRoleArn != "" {
+		annotations["iam.amazonaws.com/role"] = awsRoleArn
+	}
+
+	// Define the desired environment variables
+	desiredEnvVars := []corev1.EnvVar{
+		{Name: "ENABLE_AUTHZ", Value: "false"},                                      //FIXME
+		{Name: "IAC_URL", Value: "auth.playground.scs.splunk.com"},                  //FIXME
+		{Name: "API_GATEWAY_URL", Value: "api.playground.scs.splunk.com"},           //FIXME
+		{Name: "PLATFORM_URL", Value: "ml-platform-cyclops.dev.svc.splunk8s.io"},    //FIXME
+		{Name: "TELEMETRY_URL", Value: "https://telemetry-splkmobile.kube-bridger"}, //FIXME
+		{Name: "TELEMETRY_ENV", Value: "local"},                                     //FIXME
+		{Name: "TELEMETRY_REGION", Value: "us-west-2"},                              //FIXME
+		{Name: "ENABLE_AUTHZ", Value: "false"},                                      //FIXME
+		{Name: "AUTH_PROVIDER", Value: "scp"},                                       //FIXME
+		{Name: "S3_BUCKET", Value: s3Bucket	},                            //FIXME
+	}
+
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -245,25 +270,17 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      labels,
-					Annotations: annotaions,
+					Annotations: annotations,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: r.genAIDeployment.Spec.ServiceAccount,
+					// Add the ServiceAccount only if it is specified in the spec
+					ServiceAccountName: getServiceAccountName(r.genAIDeployment.Spec.ServiceAccount),
 					Containers: []corev1.Container{
 						{
 							Name:      "sais-container",
 							Image:     r.genAIDeployment.Spec.SaisService.Image,
 							Resources: r.genAIDeployment.Spec.SaisService.Resources,
-							Env: []corev1.EnvVar{
-								{Name: "IAC_URL", Value: "auth.playground.scs.splunk.com"},
-								{Name: "API_GATEWAY_URL", Value: "api.playground.scs.splunk.com"},
-								{Name: "PLATFORM_URL", Value: "ml-platform-cyclops.dev.svc.splunk8s.io"},
-								{Name: "TELEMETRY_URL", Value: "https://telemetry-splkmobile.kube-bridger"},
-								{Name: "TELEMETRY_ENV", Value: "local"},
-								{Name: "TELEMETRY_REGION", Value: "region-iad10"},
-								{Name: "ENABLE_AUTHZ", Value: "false"},
-								{Name: "AUTH_PROVIDER", Value: "scp"},
-							},
+							Env:   desiredEnvVars, // Use the desired environment variables
 							/*VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      r.genAIDeployment.Spec.SaisService.Volume.Name,
@@ -280,6 +297,7 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 		},
 	}
 
+	// Fetch the existing Deployment
 	existingDeployment := &appsv1.Deployment{}
 	err := r.Get(ctx, client.ObjectKey{Name: deployment.Name, Namespace: deployment.Namespace}, existingDeployment)
 	if err != nil {
@@ -287,15 +305,44 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 			return err
 		}
 
+		// Deployment does not exist, so create it
 		if err := r.Create(ctx, deployment); err != nil {
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "CreateDeploymentFailed", fmt.Sprintf("Failed to create Deployment: %v", err))
 			return fmt.Errorf("failed to create Deployment: %w", err)
 		}
-	} else if !reflect.DeepEqual(deployment.Spec, existingDeployment.Spec) {
-		existingDeployment.Spec = deployment.Spec
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "CreatedDeployment", fmt.Sprintf("Successfully created Deployment %s", deployment.Name))
+		return nil
+	}
+
+	// Only update the allowed fields within spec.template if needed
+	updated := false
+
+	// Update the ServiceAccountName only if it is provided in the spec
+	if getServiceAccountName(r.genAIDeployment.Spec.ServiceAccount) != "" &&
+		existingDeployment.Spec.Template.Spec.ServiceAccountName != r.genAIDeployment.Spec.ServiceAccount {
+		existingDeployment.Spec.Template.Spec.ServiceAccountName = r.genAIDeployment.Spec.ServiceAccount
+		updated = true
+	}
+	// Check for differences in environment variables
+	if !envVarsEqual(existingDeployment.Spec.Template.Spec.Containers[0].Env, desiredEnvVars) {
+		// Update the environment variables in the existing Deployment
+		existingDeployment.Spec.Template.Spec.Containers[0].Env = desiredEnvVars
+		updated = true
+	}
+
+	// Add logic to update other fields if necessary...
+
+	if updated {
+		// Update the Deployment with the changes
 		if err := r.Update(ctx, existingDeployment); err != nil {
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "UpdateDeploymentFailed", fmt.Sprintf("Failed to update Deployment: %v", err))
 			return fmt.Errorf("failed to update Deployment: %w", err)
 		}
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "UpdatedDeployment", fmt.Sprintf("Successfully updated Deployment %s", existingDeployment.Name))
+	} else {
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "ReconcileDeployment", "No changes detected, Deployment is up to date")
 	}
+
 	return nil
 }
 
@@ -347,4 +394,33 @@ func (r *saisServiceReconcilerImpl) ReconcileService(ctx context.Context) error 
 		}
 	}
 	return nil
+}
+
+// Helper function to get the ServiceAccountName if provided, or return an empty string
+func getServiceAccountName(serviceAccount string) string {
+	if serviceAccount != "" {
+		return serviceAccount
+	}
+	return ""
+}
+
+
+// Helper function to compare environment variables
+func envVarsEqual(existingEnvVars, desiredEnvVars []corev1.EnvVar) bool {
+	if len(existingEnvVars) != len(desiredEnvVars) {
+		return false
+	}
+
+	existingMap := make(map[string]string)
+	for _, env := range existingEnvVars {
+		existingMap[env.Name] = env.Value
+	}
+
+	for _, env := range desiredEnvVars {
+		if existingMap[env.Name] != env.Value {
+			return false
+		}
+	}
+
+	return true
 }

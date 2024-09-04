@@ -7,10 +7,10 @@ import (
 
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	enterpriseApi "github.com/vivekrsplunk/splunk-operator/api/v4"
-	splutil "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -27,11 +27,11 @@ type RayServiceReconciler interface {
 type rayServiceReconcilerImpl struct {
 	client.Client
 	genAIDeployment *enterpriseApi.GenAIDeployment
-	eventRecorder   *splutil.K8EventPublisher
+	eventRecorder   record.EventRecorder
 }
 
 // NewRayServiceReconciler creates a new instance of RayServiceReconciler.
-func NewRayServiceReconciler(c client.Client, genAIDeployment *enterpriseApi.GenAIDeployment, eventRecorder *splutil.K8EventPublisher) RayServiceReconciler {
+func NewRayServiceReconciler(c client.Client, genAIDeployment *enterpriseApi.GenAIDeployment, eventRecorder record.EventRecorder) RayServiceReconciler {
 	return &rayServiceReconcilerImpl{
 		Client:          c,
 		genAIDeployment: genAIDeployment,

@@ -20,13 +20,13 @@ metadata:
   name: genaideployment-sample
 spec:
   # TODO(user): Add fields here
-  #serviceAccount: test-controller-manager
+  serviceAccount: genai-controller-manager
   saisService:
     image:  "vivekrsplunk/saia-api:0.0.1"
     resources:
       limits:
-        cpu: "4"
-        memory: 8Gi
+        cpu: "1"
+        memory: 1Gi
       requests:
         cpu: 100m
         memory: 512Mi
@@ -34,7 +34,7 @@ spec:
   bucket:
     endpoint: https://s3-us-west-2.amazonaws.com
     name: volume_app_repo
-    path: helm-test-c3-with-apps-testnew
+    path: genai-sok-bucket
     provider: aws
     region: us-west-2
     storageType: s3
@@ -42,13 +42,13 @@ spec:
     enabled: true
     image: "rayproject/ray:2.6.1"
     headGroup:
-      numCpus: "4"
+      numCpus: "1"
     workerGroup:
       replicas: 2
       resources:
         limits:
-          cpu: "4"
-          memory: 8Gi
+          cpu: "1"
+          memory: 1Gi
         requests:
           cpu: 100m
           memory: 512Mi
@@ -59,8 +59,8 @@ spec:
     enabled: true
     resources:
       limits:
-        cpu: "4"
-        memory: "8Gi"
+        cpu: "1"
+        memory: "1Gi"
       requests:
         cpu: "100m"
         memory: "512Mi"

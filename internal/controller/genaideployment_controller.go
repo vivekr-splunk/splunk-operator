@@ -106,7 +106,7 @@ func (r *GenAIDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	reqLogger.Info("start", "CR version", instance.GetResourceVersion())
 
-	result, err := ApplyGenAIDeployment(ctx, r.Client, instance)
+	result, err := ApplyGenAIDeployment(ctx, r.Client, r.Recorder, instance)
 	if result.Requeue && result.RequeueAfter != 0 {
 		reqLogger.Info("Requeued", "period(seconds)", int(result.RequeueAfter/time.Second))
 	}
@@ -115,9 +115,9 @@ func (r *GenAIDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 // ApplyGenAIDeployment adding to handle unit test case
-var ApplyGenAIDeployment = func(ctx context.Context, client client.Client, instance *enterpriseApi.GenAIDeployment) (reconcile.Result, error) {
+var ApplyGenAIDeployment = func(ctx context.Context, client client.Client, eventRecorder record.EventRecorder, instance *enterpriseApi.GenAIDeployment) (reconcile.Result, error) {
 	//return reconcile.Result{}, nil
-	return enterprise.ApplyGenAIDeployment(ctx, client, instance)
+	return enterprise.ApplyGenAIDeployment(ctx, client, eventRecorder, instance)
 }
 
 // SetupWithManager sets up the controller with the Manager.

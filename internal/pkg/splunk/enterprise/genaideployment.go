@@ -24,10 +24,11 @@ import (
 	enterpriseApi "github.com/vivekrsplunk/splunk-operator/api/v4"
 	splcommon "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/common"
 	genai "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/genai"
-	splutil "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/util"
+
 	//"gopkg.in/yaml.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,12 +38,13 @@ import (
 // GenAIDeploymentReconciler reconciles a GenAIDeployment object
 type GenAIDeploymentReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme        *runtime.Scheme
+	eventRecorder record.EventRecorder
 }
 
 // ApplyGenAIDeployment reconciles the state of a Splunk Enterprise cluster manager.
-func ApplyGenAIDeployment(ctx context.Context, client splcommon.ControllerClient, cr *enterpriseApi.GenAIDeployment) (reconcile.Result, error) {
-	g := &GenAIDeploymentReconciler{Client: client, Scheme: client.Scheme()}
+func ApplyGenAIDeployment(ctx context.Context, client splcommon.ControllerClient, eventRecorder record.EventRecorder , cr *enterpriseApi.GenAIDeployment) (reconcile.Result, error) {
+	g := &GenAIDeploymentReconciler{Client: client, Scheme: client.Scheme(), eventRecorder: eventRecorder}
 	return g.Reconcile(ctx, cr)
 }
 
@@ -50,14 +52,11 @@ func ApplyGenAIDeployment(ctx context.Context, client splcommon.ControllerClient
 func (r *GenAIDeploymentReconciler) Reconcile(ctx context.Context, cr *enterpriseApi.GenAIDeployment) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	// Initialize event recorder using the manager
-	eventPublisher, _ := splutil.NewK8EventPublisher(r.Client, cr)
-
 	// Initialize reconcilers for each service
-	saisReconciler := genai.NewSaisServiceReconciler(r.Client, cr, eventPublisher)
-	vectorDbReconciler := genai.NewVectorDbReconciler(r.Client, cr, eventPublisher)
-	rayReconciler := genai.NewRayServiceReconciler(r.Client, cr, eventPublisher)
-	prometheusRules := genai.NewPrometheusRuleReconciler(r.Client, cr, eventPublisher)
+	saisReconciler := genai.NewSaisServiceReconciler(r.Client, cr, r.eventRecorder)
+	vectorDbReconciler := genai.NewVectorDbReconciler(r.Client, cr, r.eventRecorder)
+	rayReconciler := genai.NewRayServiceReconciler(r.Client, cr, r.eventRecorder)
+	prometheusRules := genai.NewPrometheusRuleReconciler(r.Client, cr, r.eventRecorder)
 
 	// Reconcile PrometheusRules
 

@@ -6,12 +6,12 @@ import (
 	"reflect"
 
 	enterpriseApi "github.com/vivekrsplunk/splunk-operator/api/v4"
-	splutil "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/util"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,11 +28,11 @@ type VectorDbReconciler interface {
 type vectorDbReconcilerImpl struct {
 	client.Client
 	genAIDeployment *enterpriseApi.GenAIDeployment
-	eventRecorder   *splutil.K8EventPublisher
+	eventRecorder   record.EventRecorder
 }
 
 // NewVectorDbReconciler creates a new instance of VectorDbReconciler.
-func NewVectorDbReconciler(c client.Client, genAIDeployment *enterpriseApi.GenAIDeployment, eventRecorder *splutil.K8EventPublisher) VectorDbReconciler {
+func NewVectorDbReconciler(c client.Client, genAIDeployment *enterpriseApi.GenAIDeployment, eventRecorder record.EventRecorder) VectorDbReconciler {
 	return &vectorDbReconcilerImpl{
 		Client:          c,
 		genAIDeployment: genAIDeployment,
@@ -90,7 +90,7 @@ func (r *vectorDbReconcilerImpl) ReconcileSecret(ctx context.Context) error {
 	secretName := r.genAIDeployment.Spec.VectorDbService.SecretRef
 	if secretName.Name == "" {
 		err := fmt.Errorf("SecretRef is not specified in the VectorDbService spec")
-		r.eventRecorder.Warning(ctx, "MissingSecretRef", err.Error())
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "MissingSecretRef", err.Error())
 		return err
 	}
 
@@ -99,12 +99,12 @@ func (r *vectorDbReconcilerImpl) ReconcileSecret(ctx context.Context) error {
 	err := r.Get(ctx, client.ObjectKey{Name: secretName.Name, Namespace: r.genAIDeployment.Namespace}, existingSecret)
 	if err != nil {
 		if client.IgnoreNotFound(err) != nil {
-			r.eventRecorder.Warning(ctx, "GetSecretFailed", fmt.Sprintf("Failed to get existing Secret %s: %v", secretName, err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "GetSecretFailed", fmt.Sprintf("Failed to get existing Secret %s: %v", secretName, err))
 			return fmt.Errorf("failed to get existing Secret: %w", err)
 		}
 		// Secret does not exist, return an error indicating it is required
 		err := fmt.Errorf("secret '%s' referenced by SecretRef does not exist", secretName)
-		r.eventRecorder.Warning(ctx, "SecretNotFound", err.Error())
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "SecretNotFound", err.Error())
 		return err
 	}
 
@@ -113,7 +113,7 @@ func (r *vectorDbReconcilerImpl) ReconcileSecret(ctx context.Context) error {
 	for _, key := range requiredKeys {
 		if _, exists := existingSecret.Data[key]; !exists {
 			err := fmt.Errorf("secret '%s' is missing required key: %s", secretName, key)
-			r.eventRecorder.Warning(ctx, "SecretInvalid", err.Error())
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "SecretInvalid", err.Error())
 			return err
 		}
 	}
@@ -123,10 +123,10 @@ func (r *vectorDbReconcilerImpl) ReconcileSecret(ctx context.Context) error {
 	if !isOwnerReferenceSet(existingSecret.OwnerReferences, ownerRef) {
 		existingSecret.OwnerReferences = append(existingSecret.OwnerReferences, *ownerRef)
 		if err := r.Update(ctx, existingSecret); err != nil {
-			r.eventRecorder.Warning(ctx, "UpdateSecretFailed", fmt.Sprintf("Failed to update Secret with OwnerReference: %v", err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "UpdateSecretFailed", fmt.Sprintf("Failed to update Secret with OwnerReference: %v", err))
 			return fmt.Errorf("failed to update Secret with OwnerReference: %w", err)
 		}
-		r.eventRecorder.Normal(ctx, "UpdatedSecret", fmt.Sprintf("Successfully updated Secret %s with OwnerReference", secretName))
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "UpdatedSecret", fmt.Sprintf("Successfully updated Secret %s with OwnerReference", secretName))
 	}
 
 	return nil
@@ -182,10 +182,10 @@ debug: false
 
 		// Create the ConfigMap if it does not exist
 		if err := r.Create(ctx, desiredConfigMap); err != nil {
-			r.eventRecorder.Warning(ctx, "CreateConfigMapFailed", fmt.Sprintf("Failed to create ConfigMap: %v", err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "CreateConfigMapFailed", fmt.Sprintf("Failed to create ConfigMap: %v", err))
 			return fmt.Errorf("failed to create ConfigMap: %w", err)
 		}
-		r.eventRecorder.Normal(ctx, "CreatedConfigMap", fmt.Sprintf("Successfully created ConfigMap %s", desiredConfigMap.Name))
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "CreatedConfigMap", fmt.Sprintf("Successfully created ConfigMap %s", desiredConfigMap.Name))
 	}
 
 	// Compare the existing ConfigMap data with the desired data
@@ -195,10 +195,10 @@ debug: false
 
 		// Update the ConfigMap in the cluster
 		if err := r.Update(ctx, existingConfigMap); err != nil {
-			r.eventRecorder.Warning(ctx, "UpdateConfigMapFailed", fmt.Sprintf("Failed to update ConfigMap: %v", err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "UpdateConfigMapFailed", fmt.Sprintf("Failed to update ConfigMap: %v", err))
 			return fmt.Errorf("failed to update ConfigMap: %w", err)
 		}
-		r.eventRecorder.Normal(ctx, "UpdatedConfigMap", fmt.Sprintf("Successfully updated ConfigMap %s", existingConfigMap.Name))
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "UpdatedConfigMap", fmt.Sprintf("Successfully updated ConfigMap %s", existingConfigMap.Name))
 	}
 
 	return nil
@@ -279,12 +279,12 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 	if updated {
 		// Update only the fields within spec.template
 		if err := r.Update(ctx, existingStatefulSet); err != nil {
-			r.eventRecorder.Warning(ctx, "UpdateStatefulSetFailed", fmt.Sprintf("Failed to update StatefulSet: %v", err))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "UpdateStatefulSetFailed", fmt.Sprintf("Failed to update StatefulSet: %v", err))
 			return fmt.Errorf("failed to update StatefulSet: %w", err)
 		}
-		r.eventRecorder.Normal(ctx, "UpdatedStatefulSet", fmt.Sprintf("Successfully updated StatefulSet %s", existingStatefulSet.Name))
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "UpdatedStatefulSet", fmt.Sprintf("Successfully updated StatefulSet %s", existingStatefulSet.Name))
 	} else {
-		r.eventRecorder.Normal(ctx, "ReconcileStatefulSet", "No changes detected, StatefulSet is up to date")
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "ReconcileStatefulSet", "No changes detected, StatefulSet is up to date")
 	}
 
 	return nil
@@ -488,13 +488,13 @@ func (r *vectorDbReconcilerImpl) ReconcileServices(ctx context.Context) error {
 			if err := r.Create(ctx, service); err != nil {
 				return fmt.Errorf("failed to create Service %s: %w", service.Name, err)
 			}
-			r.eventRecorder.Normal(ctx, "CreatedService", fmt.Sprintf("Successfully created Service %s", service.Name))
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "CreatedService", fmt.Sprintf("Successfully created Service %s", service.Name))
 		} else {
 			// If the service exists, do nothing
 		}
 	}
 
-	r.eventRecorder.Normal(ctx, "ReconcileServices", "Successfully reconciled Services")
+	r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "ReconcileServices", "Successfully reconciled Services")
 
 	return nil
 }
@@ -540,7 +540,7 @@ func (r *vectorDbReconcilerImpl) ReconcilePVC(ctx context.Context) error {
 		if err := r.Create(ctx, pvc); err != nil {
 			return fmt.Errorf("failed to create PVC %s: %w", pvc.Name, err)
 		}
-		//r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "Created", fmt.Sprintf("Created PVC %s", pvc.Name))
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "Created", fmt.Sprintf("Created PVC %s", pvc.Name))
 		// FIXME
 		return nil
 	}
