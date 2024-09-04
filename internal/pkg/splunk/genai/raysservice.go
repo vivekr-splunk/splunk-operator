@@ -16,7 +16,7 @@ import (
 
 // RayServiceReconciler is an interface for reconciling the RayService and its associated resources.
 type RayServiceReconciler interface {
-	Reconcile(ctx context.Context) (enterpriseApi.RayClusterStatus, error)
+	Reconcile(ctx context.Context) error
 	ReconcileRayCluster(ctx context.Context) error
 	ReconcileConfigMap(ctx context.Context) error
 	ReconcileSecret(ctx context.Context) error
@@ -171,7 +171,7 @@ func (r *rayServiceReconcilerImpl) ReconcileSecret(ctx context.Context) error {
 			},
 		},
 		Data: map[string][]byte{
-			"authKey": []byte("your-secret-auth-key"),
+			"authKey": []byte("ray-sais-sok-secret-auth-key"),
 		},
 	}
 
@@ -232,39 +232,39 @@ func (r *rayServiceReconcilerImpl) ReconcileService(ctx context.Context) error {
 }
 
 // Reconcile manages the complete reconciliation logic for the RayService and returns its status.
-func (r *rayServiceReconcilerImpl) Reconcile(ctx context.Context) (enterpriseApi.RayClusterStatus, error) {
+func (r *rayServiceReconcilerImpl) Reconcile(ctx context.Context) error {
 	status := enterpriseApi.RayClusterStatus{}
 
 	// Reconcile the RayCluster resource for RayService
 	if err := r.ReconcileRayCluster(ctx); err != nil {
 		status.State = "Error"
 		status.Message = "Failed to reconcile RayCluster"
-		return status, err
+		return err
 	}
 
 	// Reconcile the ConfigMap for RayService if needed
 	if err := r.ReconcileConfigMap(ctx); err != nil {
 		status.State = "Error"
 		status.Message = "Failed to reconcile ConfigMap"
-		return status, err
+		return err
 	}
 
 	// Reconcile the Secret for RayService if needed
 	if err := r.ReconcileSecret(ctx); err != nil {
 		status.State = "Error"
 		status.Message = "Failed to reconcile Secret"
-		return status, err
+		return err
 	}
 
 	// Reconcile the Service for RayService
 	if err := r.ReconcileService(ctx); err != nil {
 		status.State = "Error"
 		status.Message = "Failed to reconcile Service"
-		return status, err
+		return err
 	}
 
 	// If all reconciliations succeed, update the status to Running
 	status.State = "Running"
 	status.Message = "RayService is running successfully"
-	return status, nil
+	return nil
 }

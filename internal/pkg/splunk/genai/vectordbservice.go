@@ -17,7 +17,7 @@ import (
 
 // VectorDbReconciler is an interface for reconciling the VectorDbService and its associated resources.
 type VectorDbReconciler interface {
-	Reconcile(ctx context.Context) (enterpriseApi.VectorDbStatus, error)
+	Reconcile(ctx context.Context) error
 	ReconcileSecret(ctx context.Context) error
 	ReconcileConfigMap(ctx context.Context) error
 	ReconcileStatefulSet(ctx context.Context) error
@@ -41,48 +41,48 @@ func NewVectorDbReconciler(c client.Client, genAIDeployment *enterpriseApi.GenAI
 }
 
 // Reconcile manages the complete reconciliation logic for the VectorDbService and returns its status.
-func (r *vectorDbReconcilerImpl) Reconcile(ctx context.Context) (enterpriseApi.VectorDbStatus, error) {
+func (r *vectorDbReconcilerImpl) Reconcile(ctx context.Context) error {
 	status := enterpriseApi.VectorDbStatus{}
 
 	// Reconcile the Secret for Weaviate
 	if err := r.ReconcileSecret(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile Secret"
-		return status, err
+		return err
 	}
 
 	// Reconcile the ConfigMap for Weaviate
 	if err := r.ReconcileConfigMap(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile ConfigMap"
-		return status, err
+		return err
 	}
 
 	// Reconcile PVC for Weaviate StatefulSet
 	if err := r.ReconcilePVC(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile PVCs"
-		return status, fmt.Errorf("failed to reconcile PVC: %w", err)
+		return fmt.Errorf("failed to reconcile PVC: %w", err)
 	}
 
 	// Reconcile the StatefulSet for Weaviate
 	if err := r.ReconcileStatefulSet(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile StatefulSet"
-		return status, err
+		return err
 	}
 
 	// Reconcile the Services for Weaviate
 	if err := r.ReconcileServices(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile Services"
-		return status, err
+		return err
 	}
 
 	// If all reconciliations succeed, update the status to Running
 	status.Status = "Running"
 	status.Message = "Weaviate is running successfully"
-	return status, nil
+	return nil
 }
 
 func (r *vectorDbReconcilerImpl) ReconcileSecret(ctx context.Context) error {

@@ -89,12 +89,26 @@ type VectorDbSpec struct {
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"` // TopologySpreadConstraint https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
 }
 
+const (
+	// ConditionTypeSaisService represents the condition type for SaisService
+	ConditionTypeSaisService = "SaisService"
+
+	// ConditionTypeVectorDbService represents the condition type for VectorDbService
+	ConditionTypeVectorDbService = "VectorDbService"
+
+	// ConditionTypeRayService represents the condition type for RayService
+	ConditionTypeRayService = "RayService"
+
+	// ConditionTypeGenAIWorkload represents the overall condition of the GenAI workload
+	ConditionTypeGenAIWorkload = "GenAIWorkload"
+)
+
 // GenAIDeploymentStatus defines the observed state of GenAIDeployment
 type GenAIDeploymentStatus struct {
-	SaisServiceStatus   SaisServiceStatus `json:"saisServiceStatus,omitempty"`   // Status of the SaisService
-	VectorDbStatus      VectorDbStatus    `json:"vectorDbStatus,omitempty"`      // Status of the VectorDB service
-	RayClusterStatus    RayClusterStatus  `json:"rayClusterStatus,omitempty"`    // Status of the RayCluster
-	GenAIWorkloadStatus string            `json:"genAIWorkloadStatus,omitempty"` // Overall status of the GenAI workloa// Conditions store the status conditions of the GenAIDeployment instances
+	//SaisServiceStatus   SaisServiceStatus `json:"saisServiceStatus,omitempty"`   // Status of the SaisService
+	//VectorDbStatus      VectorDbStatus    `json:"vectorDbStatus,omitempty"`      // Status of the VectorDB service
+	//RayClusterStatus    RayClusterStatus  `json:"rayClusterStatus,omitempty"`    // Status of the RayCluster
+	//GenAIWorkloadStatus string            `json:"genAIWorkloadStatus,omitempty"` // Overall status of the GenAI workloa// Conditions store the status conditions of the GenAIDeployment instances
 	// Represents the observations of a GenAIDeployment's current state.
 	// GenAIDeployment.status.conditions.type are: "Available", "Progressing", and "Degraded"
 	// GenAIDeployment.status.conditions.status are one of True, False, Unknown.

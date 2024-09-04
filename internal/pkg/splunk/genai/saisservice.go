@@ -15,7 +15,7 @@ import (
 
 // SaisServiceReconciler is an interface for reconciling the SaisService and its associated resources.
 type SaisServiceReconciler interface {
-	Reconcile(ctx context.Context) (enterpriseApi.SaisServiceStatus, error)
+	Reconcile(ctx context.Context) error
 	ReconcileServiceAccount(ctx context.Context) error
 	ReconcileSecret(ctx context.Context) error
 	ReconcileConfigMap(ctx context.Context) error
@@ -40,42 +40,42 @@ func NewSaisServiceReconciler(c client.Client, genAIDeployment *enterpriseApi.Ge
 }
 
 // Reconcile manages the complete reconciliation logic for the SaisService and returns its status.
-func (r *saisServiceReconcilerImpl) Reconcile(ctx context.Context) (enterpriseApi.SaisServiceStatus, error) {
+func (r *saisServiceReconcilerImpl) Reconcile(ctx context.Context) error {
 	status := enterpriseApi.SaisServiceStatus{}
 
 	// Reconcile the ServiceAccount for SaisService if specified
 	if err := r.ReconcileServiceAccount(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile ServiceAccount"
-		return status, err
+		return err
 	}
 
 	// Reconcile the Secret for SaisService
 	if err := r.ReconcileSecret(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile Secret"
-		return status, err
+		return err
 	}
 
 	// Reconcile the ConfigMap for SaisService
 	if err := r.ReconcileConfigMap(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile ConfigMap"
-		return status, err
+		return err
 	}
 
 	// Reconcile the Deployment for SaisService
 	if err := r.ReconcileDeployment(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile Deployment"
-		return status, err
+		return err
 	}
 
 	// Reconcile the Service for SaisService
 	if err := r.ReconcileService(ctx); err != nil {
 		status.Status = "Error"
 		status.Message = "Failed to reconcile Service"
-		return status, err
+		return err
 	}
 
 	// Write to event recorder
@@ -84,7 +84,7 @@ func (r *saisServiceReconcilerImpl) Reconcile(ctx context.Context) (enterpriseAp
 	// If all reconciliations succeed, update the status to Running
 	status.Status = "Running"
 	status.Message = "SaisService is running successfully"
-	return status, nil
+	return nil
 }
 
 func (r *saisServiceReconcilerImpl) ReconcileServiceAccount(ctx context.Context) error {

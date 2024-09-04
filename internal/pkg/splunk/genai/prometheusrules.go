@@ -59,7 +59,7 @@ func (r *prometheusRuleReconcilerImpl) ReconcileConfigMap(ctx context.Context) e
 			Name:      configMapName,
 			Namespace: r.genAIDeployment.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name": "prometheus-rules",
+				"app.kubernetes.io/name":       "prometheus-rules",
 				"app.kubernetes.io/managed-by": "sok",
 			},
 			OwnerReferences: []metav1.OwnerReference{
