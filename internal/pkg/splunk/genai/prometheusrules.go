@@ -59,8 +59,8 @@ func (r *prometheusRuleReconcilerImpl) ReconcileConfigMap(ctx context.Context) e
 			Name:      configMapName,
 			Namespace: r.genAIDeployment.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":       "prometheus-rules",
-				"app.kubernetes.io/managed-by": "Helm",
+				"app.kubernetes.io/name": "prometheus-rules",
+				"app.kubernetes.io/managed-by": "sok",
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),
@@ -123,7 +123,7 @@ func (r *prometheusRuleReconcilerImpl) ReconcilePrometheusRule(ctx context.Conte
 				Namespace: r.genAIDeployment.Namespace,
 				Labels: map[string]string{
 					"app.kubernetes.io/name":       "prometheus-rules",
-					"app.kubernetes.io/managed-by": "Helm",
+					"app.kubernetes.io/managed-by": "sok",
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),

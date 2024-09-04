@@ -149,7 +149,7 @@ func (r *vectorDbReconcilerImpl) ReconcileConfigMap(ctx context.Context) error {
 			Namespace: r.genAIDeployment.Namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/name":       "weaviate",
-				"app.kubernetes.io/managed-by": "Helm",
+				"app.kubernetes.io/managed-by": "sok",
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),
@@ -210,20 +210,102 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 		"deployment": r.genAIDeployment.Name,
 	}
 
-	statefulSet := &appsv1.StatefulSet{
+	// Define the name of the StatefulSet
+	statefulSetName := "weaviate"
+
+	// Fetch the existing StatefulSet
+	existingStatefulSet := &appsv1.StatefulSet{}
+	err := r.Get(ctx, client.ObjectKey{Name: statefulSetName, Namespace: r.genAIDeployment.Namespace}, existingStatefulSet)
+	if err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return err
+		}
+
+		// StatefulSet does not exist, so create it
+		if err := r.Create(ctx, generateDesiredStatefulSet(r.genAIDeployment, labels)); err != nil {
+			//r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "CreateStatefulSetFailed", fmt.Sprintf("Failed to create StatefulSet: %v", err))
+			return fmt.Errorf("failed to create StatefulSet: %w", err)
+		}
+		//r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "CreatedStatefulSet", fmt.Sprintf("Successfully created StatefulSet %s", statefulSetName))
+		return nil
+	}
+
+	// Existing StatefulSet found - check for necessary updates
+	updated := false
+
+	// Iterate over containers and update only the one managed by the operator
+	for i, container := range existingStatefulSet.Spec.Template.Spec.Containers {
+		if container.Name == "weaviate" { // Only update the 'weaviate' container managed by this operator
+			// Check and update the container's image
+			if container.Image != r.genAIDeployment.Spec.VectorDbService.Image {
+				existingStatefulSet.Spec.Template.Spec.Containers[i].Image = r.genAIDeployment.Spec.VectorDbService.Image
+				updated = true
+			}
+
+			// Check and update environment variables, volume mounts, and ports
+			existingStatefulSet.Spec.Template.Spec.Containers[i].Env = []corev1.EnvVar{
+				{Name: "CLUSTER_BASIC_AUTH_USERNAME", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "weaviate-cluster-api-basic-auth"},
+						Key:                  "username",
+					}}},
+				{Name: "CLUSTER_BASIC_AUTH_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "weaviate-cluster-api-basic-auth"},
+						Key:                  "password",
+					}}},
+			}
+
+			existingStatefulSet.Spec.Template.Spec.Containers[i].VolumeMounts = []corev1.VolumeMount{
+				{
+					Name:      "weaviate-config",
+					MountPath: "/weaviate-config",
+				},
+				{
+					Name:      "weaviate-data",
+					MountPath: "/var/lib/weaviate",
+				},
+			}
+
+			existingStatefulSet.Spec.Template.Spec.Containers[i].Ports = []corev1.ContainerPort{
+				{ContainerPort: 8080},
+				{Name: "grpc", ContainerPort: 50051, Protocol: corev1.ProtocolTCP},
+			}
+
+			updated = true
+		}
+	}
+
+	if updated {
+		// Update only the fields within spec.template
+		if err := r.Update(ctx, existingStatefulSet); err != nil {
+			r.eventRecorder.Warning(ctx, "UpdateStatefulSetFailed", fmt.Sprintf("Failed to update StatefulSet: %v", err))
+			return fmt.Errorf("failed to update StatefulSet: %w", err)
+		}
+		r.eventRecorder.Normal(ctx, "UpdatedStatefulSet", fmt.Sprintf("Successfully updated StatefulSet %s", existingStatefulSet.Name))
+	} else {
+		r.eventRecorder.Normal(ctx, "ReconcileStatefulSet", "No changes detected, StatefulSet is up to date")
+	}
+
+	return nil
+}
+
+// Helper function to generate the desired StatefulSet
+func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, labels map[string]string) *appsv1.StatefulSet {
+	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "weaviate",
-			Namespace: r.genAIDeployment.Namespace,
+			Namespace: genAIDeployment.Namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/name":       "weaviate",
-				"app.kubernetes.io/managed-by": "Helm",
+				"app.kubernetes.io/managed-by": "sok",
 			},
 			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),
+				*metav1.NewControllerRef(genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),
 			},
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas:    &r.genAIDeployment.Spec.VectorDbService.Replicas,
+			Replicas:    &genAIDeployment.Spec.VectorDbService.Replicas,
 			ServiceName: "weaviate-headless",
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
@@ -236,7 +318,7 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 					Containers: []corev1.Container{
 						{
 							Name:  "weaviate",
-							Image: "cr.weaviate.io/semitechnologies/weaviate:1.26.1",
+							Image: genAIDeployment.Spec.VectorDbService.Image,
 							Env: []corev1.EnvVar{
 								{Name: "CLUSTER_BASIC_AUTH_USERNAME", ValueFrom: &corev1.EnvVarSource{
 									SecretKeyRef: &corev1.SecretKeySelector{
@@ -296,35 +378,15 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 						Resources: corev1.VolumeResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse(r.genAIDeployment.Spec.VectorDbService.Storage.StorageCapacity),
+								corev1.ResourceStorage: resource.MustParse(genAIDeployment.Spec.VectorDbService.Storage.StorageCapacity),
 							},
 						},
-						StorageClassName: &r.genAIDeployment.Spec.VectorDbService.Storage.StorageClassName,
+						StorageClassName: &genAIDeployment.Spec.VectorDbService.Storage.StorageClassName,
 					},
 				},
 			},
 		},
 	}
-
-	existingStatefulSet := &appsv1.StatefulSet{}
-	err := r.Get(ctx, client.ObjectKey{Name: statefulSet.Name, Namespace: statefulSet.Namespace}, existingStatefulSet)
-	if err != nil {
-		if client.IgnoreNotFound(err) != nil {
-			return err
-		}
-
-		if err := r.Create(ctx, statefulSet); err != nil {
-			r.eventRecorder.Warning(ctx, "CreateStatefulSetFailed", fmt.Errorf("failed to create StatefulSet: %w", err).Error())
-			return fmt.Errorf("failed to create StatefulSet: %w", err)
-		}
-	} else if !reflect.DeepEqual(statefulSet.Spec, existingStatefulSet.Spec) {
-		existingStatefulSet.Spec = statefulSet.Spec
-		if err := r.Update(ctx, existingStatefulSet); err != nil {
-			return fmt.Errorf("failed to update StatefulSet: %w", err)
-		}
-	}
-	r.eventRecorder.Normal(ctx, "ReconcileStatefulSet", "Successfully reconciled StatefulSet")
-	return nil
 }
 
 func (r *vectorDbReconcilerImpl) ReconcileServices(ctx context.Context) error {
@@ -336,7 +398,7 @@ func (r *vectorDbReconcilerImpl) ReconcileServices(ctx context.Context) error {
 				Namespace: r.genAIDeployment.Namespace,
 				Labels: map[string]string{
 					"app.kubernetes.io/name":       "weaviate",
-					"app.kubernetes.io/managed-by": "Helm",
+					"app.kubernetes.io/managed-by": "sok",
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),
@@ -363,7 +425,7 @@ func (r *vectorDbReconcilerImpl) ReconcileServices(ctx context.Context) error {
 				Namespace: r.genAIDeployment.Namespace,
 				Labels: map[string]string{
 					"app.kubernetes.io/name":       "weaviate",
-					"app.kubernetes.io/managed-by": "Helm",
+					"app.kubernetes.io/managed-by": "sok",
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),
@@ -390,7 +452,7 @@ func (r *vectorDbReconcilerImpl) ReconcileServices(ctx context.Context) error {
 				Namespace: r.genAIDeployment.Namespace,
 				Labels: map[string]string{
 					"app.kubernetes.io/name":       "weaviate",
-					"app.kubernetes.io/managed-by": "Helm",
+					"app.kubernetes.io/managed-by": "sok",
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),
@@ -449,7 +511,7 @@ func (r *vectorDbReconcilerImpl) ReconcilePVC(ctx context.Context) error {
 			Namespace: r.genAIDeployment.Namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/name":       "weaviate",
-				"app.kubernetes.io/managed-by": "Helm",
+				"app.kubernetes.io/managed-by": "sok",
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),

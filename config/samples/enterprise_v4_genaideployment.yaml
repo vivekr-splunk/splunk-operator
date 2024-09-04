@@ -5,7 +5,7 @@ metadata:
   name: weaviate-cluster-api-basic-auth
   labels:
     app.kubernetes.io/name: weaviate
-    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/managed-by: sok
 type: Opaque
 data:
   username: YWRtaW4=  # Base64 encoded 'admin'
@@ -22,7 +22,7 @@ spec:
   # TODO(user): Add fields here
   #serviceAccount: test-controller-manager
   saisService:
-    image:  "vivekrsplunk/sais-api:0.0.1"
+    image:  "vivekrsplunk/saia-api:0.0.1"
     resources:
       limits:
         cpu: "4"
@@ -68,36 +68,3 @@ spec:
       storageClassName: "standard"
       storageCapacity: "32Gi"
     replicas: 3
-    affinity:
-      nodeAffinity:
-        requiredDuringSchedulingIgnoredDuringExecution:
-          nodeSelectorTerms:
-            - matchExpressions:
-                - key: "kubernetes.io/hostname"
-                  operator: In
-                  values:
-                    - "gpu-node-1"
-                    - "gpu-node-2"
-    tolerations:
-      - key: "nvidia.com/gpu"
-        operator: "Exists"
-        effect: "NoSchedule"
-    serviceTemplate:
-      metadata:
-        labels:
-          app.kubernetes.io/name: weaviate
-          app.kubernetes.io/managed-by: Helm
-      spec:
-        type: LoadBalancer
-        ports:
-          - name: http
-            port: 80
-            protocol: TCP
-            targetPort: 8080
-    topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: "kubernetes.io/hostname"
-        whenUnsatisfiable: "DoNotSchedule"
-        labelSelector:
-          matchLabels:
-            app: weaviate
