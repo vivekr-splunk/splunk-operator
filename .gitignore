@@ -25,3 +25,15 @@ go.work
 *.swp
 *.swo
 *~
+api/v4/genaideployment_types.go
+api/v4/zz_generated.deepcopy.go
+cmd/__debug_bin1348475840
+cmd/__debug_bin1348475840
+config/crd/bases/enterprise.splunk.com_genaideployments.yaml
+config/samples/enterprise_v4_genaideployment.yaml
+config/crd/bases/enterprise.splunk.com_genaideployments.yaml
+config/crd/bases/enterprise.splunk.com_genaideployments.yaml
+config/samples/enterprise_v4_genaideployment.yaml
+config/samples/enterprise_v4_genaideployment.yaml
+internal/pkg/splunk/genai/raysservice.go
+internal/pkg/splunk/genai/raysservice.go

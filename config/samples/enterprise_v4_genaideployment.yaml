@@ -83,6 +83,16 @@ spec:
         requests:
           cpu: 100m
           memory: 512Mi
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: region
+                operator: In
+                values:
+                - us-west-2
   vectordbService:
     image: "cr.weaviate.io/semitechnologies/weaviate:1.26.1"
     secretRef:
