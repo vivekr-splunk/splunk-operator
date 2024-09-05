@@ -163,7 +163,14 @@ func (r *saisServiceReconcilerImpl) ReconcileConfigMap(ctx context.Context) erro
 			},
 		},
 		Data: map[string]string{
-			"configKey": "configValue",
+			"IAC_URL":          "auth.playground.scs.splunk.com",
+			"API_GATEWAY_URL":  "api.playground.scs.splunk.com",
+			"PLATFORM_URL":     "ml-platform-cyclops.dev.svc.splunk8s.io",
+			"TELEMETRY_URL":    "https://telemetry-splkmobile.kube-bridger",
+			"TELEMETRY_ENV":    "local",
+			"TELEMETRY_REGION": "region-iad10",
+			"ENABLE_AUTHZ":     "false",
+			"AUTH_PROVIDER":    "scp",
 		},
 	}
 
@@ -177,12 +184,6 @@ func (r *saisServiceReconcilerImpl) ReconcileConfigMap(ctx context.Context) erro
 		if err := r.Create(ctx, configMap); err != nil {
 			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to create ConfigMap: %v", err))
 			return fmt.Errorf("failed to create ConfigMap: %w", err)
-		}
-	} else if !reflect.DeepEqual(configMap.Data, existingConfigMap.Data) {
-		existingConfigMap.Data = configMap.Data
-		if err := r.Update(ctx, existingConfigMap); err != nil {
-			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to update ConfigMap: %v", err))
-			return fmt.Errorf("failed to update ConfigMap: %w", err)
 		}
 	}
 	return nil
