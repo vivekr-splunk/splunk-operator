@@ -69,7 +69,7 @@ spec:
       name: sais-secret
     configMapRef: 
       name: sais-service-config
-    image:  "vivekrsplunk/sait:v0.1.48"
+    image:  "testing/saia-api:v0.1.48"
     resources:
       limits:
         cpu: "2"
