@@ -11,7 +11,7 @@ data:
   PLATFORM_URL: "kuberay-operator.splunk-operator-system.cluster.local:8080" # ray service url 
   TELEMETRY_URL: "https://telemetry-splkmobile.kube-bridger"
   TELEMETRY_ENV: ""
-  TELEMETRY_REGION: "region-iad10"
+  TELEMETRY_REGION: "us-west-2"
   ENABLE_AUTHZ: "false"
   SCPAUTH_SECRET_PATH: "/etc/sais-service-secret"
   SAIA_API_VERSION: "v1"
