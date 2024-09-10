@@ -42,7 +42,13 @@ func NewRayServiceReconciler(c client.Client, genAIDeployment *enterpriseApi.Gen
 
 func (r *rayServiceReconcilerImpl) ReconcileRayCluster(ctx context.Context) error {
 	log := log.FromContext(ctx)
-	rayClusterName := fmt.Sprintf("%s-ray-cluster", r.genAIDeployment.Name)	
+	rayClusterName := fmt.Sprintf("%s-ray-cluster", r.genAIDeployment.Name)
+
+	if !r.genAIDeployment.Spec.RayService.Enabled {
+		r.EventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "Reconcile", "RayService is not enabled")
+		return nil
+	}
+
 	// Fetch the existing RayCluster
 	existingRayCluster := &rayv1.RayCluster{}
 	err := r.Get(ctx, client.ObjectKey{Name: rayClusterName, Namespace: r.genAIDeployment.Namespace}, existingRayCluster)

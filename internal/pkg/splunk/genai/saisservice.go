@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -143,13 +144,7 @@ func (r *saisServiceReconcilerImpl) ReconcileSecret(ctx context.Context) error {
 			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to create Secret: %v", err))
 			return fmt.Errorf("failed to create Secret: %w", err)
 		}
-	} else if !reflect.DeepEqual(secret.Data, existingSecret.Data) {
-		existingSecret.Data = secret.Data
-		if err := r.Update(ctx, existingSecret); err != nil {
-			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to update Secret: %v", err))
-			return fmt.Errorf("failed to update Secret: %w", err)
-		}
-	}
+	} 
 	return nil
 }
 
@@ -167,10 +162,11 @@ func (r *saisServiceReconcilerImpl) ReconcileConfigMap(ctx context.Context) erro
 			"API_GATEWAY_URL":  "api.playground.scs.splunk.com",
 			"PLATFORM_URL":     "ml-platform-cyclops.dev.svc.splunk8s.io",
 			"TELEMETRY_URL":    "https://telemetry-splkmobile.kube-bridger",
-			"TELEMETRY_ENV":    "local",
+			"TELEMETRY_ENV":    "",
 			"TELEMETRY_REGION": "region-iad10",
 			"ENABLE_AUTHZ":     "false",
-			"AUTH_PROVIDER":    "scp",
+			"AUTH_PROVIDER":       "",
+			"SCPAUTH_SECRET_PATH": "/etc/sais-service-secret",
 		},
 	}
 
@@ -282,7 +278,26 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
 				Key:                  "AUTH_PROVIDER",
 			}}},
+		{Name: "SCPAUTH_SECRET_PATH", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "SCPAUTH_SECRET_PATH",
+			}}},
 		{Name: "S3_BUCKET", Value: s3Bucket}, //FIXME
+	}
+
+	// Add the secret as a volume
+	secretName := "sais-service-secret"
+	secretMountPath := "/etc/sais-service-secret" // Adjust the mount path as needed
+
+	// Define the volume for the secret
+	secretVolume := corev1.Volume{
+		Name: secretName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+			},
+		},
 	}
 
 	deployment := &appsv1.Deployment{
@@ -312,6 +327,8 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 							Image:     r.genAIDeployment.Spec.SaisService.Image,
 							Resources: r.genAIDeployment.Spec.SaisService.Resources,
 							Env:       configMapEnvVars, // Use the desired environment variables
+							Command:   []string{"python"},
+							Args:      []string{"-m", "uvicorn", "--host", "0.0.0.0", "server.main:app", "--port", "8080"},
 							/*VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      r.genAIDeployment.Spec.SaisService.Volume.Name,
@@ -328,9 +345,65 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 		},
 	}
 
+	// Check if the volume already exists; if not, add it
+	volumeExists := false
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.Name == secretName {
+			volumeExists = true
+			break
+		}
+	}
+	if !volumeExists {
+		deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, secretVolume)
+	}
+
+	// Define the volume mount for the secret
+	secretVolumeMount := corev1.VolumeMount{
+		Name:      secretName,
+		MountPath: secretMountPath,
+		ReadOnly:  true,
+	}
+
+	// Attach the volume mount to the first container in the deployment
+	if len(deployment.Spec.Template.Spec.Containers) > 0 {
+		container := &deployment.Spec.Template.Spec.Containers[0]
+		volumeMountExists := false
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == secretName {
+				volumeMountExists = true
+				break
+			}
+		}
+		if !volumeMountExists {
+			container.VolumeMounts = append(container.VolumeMounts, secretVolumeMount)
+		}
+
+		// Define the environment variable for the secret path
+		envVarExists := false
+		for _, envVar := range container.Env {
+			if envVar.Name == "SCPAUTH_SECRET_PATH" {
+				envVarExists = true
+				break
+			}
+		}
+		if !envVarExists {
+			secretEnvVar := corev1.EnvVar{
+				Name:  "SCPAUTH_SECRET_PATH",
+				Value: secretMountPath,
+			}
+			container.Env = append(container.Env, secretEnvVar)
+		}
+	}
+
+	err := r.AddEnvVarsFromSecretToDeployment(ctx, deployment, secretName, "sais-container")
+	if err != nil {
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to add environment variables from secret: %v", err))
+		return fmt.Errorf("failed to add environment variables from secret: %w", err)
+	}
+
 	// Fetch the existing Deployment
 	existingDeployment := &appsv1.Deployment{}
-	err := r.Get(ctx, client.ObjectKey{Name: deployment.Name, Namespace: deployment.Namespace}, existingDeployment)
+	err = r.Get(ctx, client.ObjectKey{Name: deployment.Name, Namespace: deployment.Namespace}, existingDeployment)
 	if err != nil {
 		if client.IgnoreNotFound(err) != nil {
 			return err
@@ -426,6 +499,48 @@ func (r *saisServiceReconcilerImpl) ReconcileService(ctx context.Context) error 
 	}
 	return nil
 }
+
+
+
+// AddEnvVarsFromSecretToDeployment adds environment variables from a secret to a deployment's container
+func (r *saisServiceReconcilerImpl) AddEnvVarsFromSecretToDeployment(ctx context.Context,  deployment *appsv1.Deployment, secretName, containerName string) error {
+	
+	namespacedName := types.NamespacedName{
+        Namespace: r.genAIDeployment.Namespace,
+        Name:      secretName,
+    }
+	secret := &corev1.Secret{}
+    // Fetch the secret
+    err := r.Get(ctx, namespacedName, secret)
+    if err != nil {
+        return fmt.Errorf("failed to get secret: %v", err)
+    }
+	
+    // Find the specified container
+    var container *corev1.Container
+    for i := range deployment.Spec.Template.Spec.Containers {
+        if deployment.Spec.Template.Spec.Containers[i].Name == containerName {
+            container = &deployment.Spec.Template.Spec.Containers[i]
+            break
+        }
+    }
+    if container == nil {
+        return fmt.Errorf("container %s not found", containerName)
+    }
+
+    // Add environment variables from the secret
+    envVars := []corev1.EnvVar{}
+    for key, value := range secret.Data {
+        envVars = append(envVars, corev1.EnvVar{
+            Name:  key,
+            Value: string(value),
+        })
+    }
+    container.Env = append(container.Env, envVars...)
+    return nil
+}
+
+
 
 // Helper function to get the ServiceAccountName if provided, or return an empty string
 func getServiceAccountName(serviceAccount string) string {

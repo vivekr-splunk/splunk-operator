@@ -5,19 +5,24 @@ metadata:
   labels:
     app: sais-service
 data:
+  SCS_TOKEN: ""
   IAC_URL: "auth.playground.scs.splunk.com"
   API_GATEWAY_URL: "api.playground.scs.splunk.com"
-  PLATFORM_URL: "ml-platform-cyclops.dev.svc.splunk8s.io"
+  PLATFORM_URL: "kuberay-operator.splunk-operator-system.cluster.local:8080" # ray service url 
   TELEMETRY_URL: "https://telemetry-splkmobile.kube-bridger"
-  TELEMETRY_ENV: "local"
+  TELEMETRY_ENV: ""
   TELEMETRY_REGION: "region-iad10"
   ENABLE_AUTHZ: "false"
-  AUTH_PROVIDER: "scp"
+  SCPAUTH_SECRET_PATH: "/etc/sais-service-secret"
+  SAIA_API_VERSION: "v1"
+  PLATFORM_VERSION: "v1"
+  AUTH_PROVIDER: ""
+
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: sais-secret
+  name: sais-service-secret
   labels:
     app.kubernetes.io/name: sais
     app.kubernetes.io/managed-by: sok
@@ -25,18 +30,28 @@ type: Opaque
 data:
   username: YWRtaW4=  # Base64 encoded 'admin'
   password: c2VjcmV0  # Base64 encoded 'secret'
+  AWS_ACCESS_KEY_ID: QUtJQVpXNkVDWkVJM0JVNVFBNFE=
+  AWS_SECRET_ACCESS_KEY: MkR6TkZ4Zk90MGdzRDFyVTk1WGtNWDMrN0Z3YlZ0bW1PL2FQTmIxQg==
+  AWS_SECURITY_TOKEN: YWRtaW4=
+  AWS_SESSION_TOKEN: YWRtaW4=
+
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: weaviate-cluster-api-basic-auth
+  name: weaviate-auth-secret
   labels:
     app.kubernetes.io/name: weaviate
     app.kubernetes.io/managed-by: sok
 type: Opaque
 data:
-  username: YWRtaW4=  # Base64 encoded 'admin'
-  password: c2VjcmV0  # Base64 encoded 'secret'
+  username: "MEQzaWdUNlpBS0lKdzdtZ3VmMEdtdlNmZ012eTQ0UEg="
+  password: "R04zTnpZNU8xWTRRbEhVcmdlazR6Y1AzREUzUUFPOXI="
+  AUTHENTICATION_APIKEY_ENABLED: dHJ1ZQo= # true
+  AUTHENTICATION_APIKEY_ALLOWED_KEYS:  dml2ZWstc2VjcmV0LWtleSxhcmp1bi1zZWNyZXQta2V5Cg== #'vivek-secret-key,arjun-secret-key'
+  AUTHENTICATION_APIKEY_USERS:  dml2ZWtyQHNwbHVuay5jb20sdml2ZWtyCg== #'vivekr@splunk.com,vivekr'
+  AUTHORIZATION_ADMINLIST_READONLY_USERS:  aWFuLXNtaXRoLHJvYmVydGFAZG9lLmNvbQo= #'ian-smith,roberta@doe.com'
+
 ---
 apiVersion: enterprise.splunk.com/v4
 kind: GenAIDeployment
@@ -53,11 +68,11 @@ spec:
       name: sais-secret
     configMapRef: 
       name: sais-service-config
-    image:  "vivekrsplunk/saia-api:0.0.1"
+    image:  "vivekrsplunk/sait:v0.1.48"
     resources:
       limits:
-        cpu: "1"
-        memory: 1Gi
+        cpu: "2"
+        memory: 4Gi
       requests:
         cpu: 100m
         memory: 512Mi
@@ -71,7 +86,7 @@ spec:
     storageType: s3
   rayService:
     enabled: true
-    image: "rayproject/ray:2.6.1"
+    image: "rayproject/ray:2.35.0-py311"
     headGroup:
       numCpus: "1"
     workerGroup:
@@ -96,7 +111,7 @@ spec:
   vectordbService:
     image: "cr.weaviate.io/semitechnologies/weaviate:1.26.1"
     secretRef:
-      name: weaviate-cluster-api-basic-auth
+      name: weaviate-auth-secret
     enabled: true
     resources:
       limits:
@@ -106,6 +121,6 @@ spec:
         cpu: "100m"
         memory: "512Mi"
     storage:
-      storageClassName: "standard"
+      storageClassName: "gp2"
       storageCapacity: "32Gi"
     replicas: 3

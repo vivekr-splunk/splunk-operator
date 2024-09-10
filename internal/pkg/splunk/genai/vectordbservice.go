@@ -2,8 +2,12 @@ package genai
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 
 	enterpriseApi "github.com/vivekrsplunk/splunk-operator/api/v4"
 	appsv1 "k8s.io/api/apps/v1"
@@ -43,6 +47,12 @@ func NewVectorDbReconciler(c client.Client, genAIDeployment *enterpriseApi.GenAI
 // Reconcile manages the complete reconciliation logic for the VectorDbService and returns its status.
 func (r *vectorDbReconcilerImpl) Reconcile(ctx context.Context) error {
 	status := enterpriseApi.VectorDbStatus{}
+	if !r.genAIDeployment.Spec.VectorDbService.Enabled {
+		status.Status = "Success"
+		status.Message = "VectorDbService is not enabled"
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "Reconcile", "VectorDbService is not enabled")
+		return nil
+	}
 
 	// Reconcile the Secret for Weaviate
 	if err := r.ReconcileSecret(ctx); err != nil {
@@ -109,7 +119,7 @@ func (r *vectorDbReconcilerImpl) ReconcileSecret(ctx context.Context) error {
 	}
 
 	// Ensure that the Secret has the expected data keys
-	requiredKeys := []string{"username", "password"}
+	requiredKeys := []string{"AUTHENTICATION_APIKEY_ENABLED", "AUTHENTICATION_APIKEY_ALLOWED_KEYS"}
 	for _, key := range requiredKeys {
 		if _, exists := existingSecret.Data[key]; !exists {
 			err := fmt.Errorf("secret '%s' is missing required key: %s", secretName, key)
@@ -177,7 +187,7 @@ debug: false
 	err := r.Get(ctx, client.ObjectKey{Name: desiredConfigMap.Name, Namespace: desiredConfigMap.Namespace}, existingConfigMap)
 	if err != nil {
 		if client.IgnoreNotFound(err) != nil {
-			return err
+			return fmt.Errorf("failed to get ConfigMap: %w", err)
 		}
 
 		// Create the ConfigMap if it does not exist
@@ -186,6 +196,7 @@ debug: false
 			return fmt.Errorf("failed to create ConfigMap: %w", err)
 		}
 		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "CreatedConfigMap", fmt.Sprintf("Successfully created ConfigMap %s", desiredConfigMap.Name))
+		return nil
 	}
 
 	// Compare the existing ConfigMap data with the desired data
@@ -212,21 +223,33 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 
 	// Define the name of the StatefulSet
 	statefulSetName := "weaviate"
+	namespace := r.genAIDeployment.Namespace
+	configMapName := "weaviate-config"
+
+	namespacedName := client.ObjectKey{Name: configMapName, Namespace: namespace}
+	configMap := &corev1.ConfigMap{}
+
+	// Get the ConfigMap
+	err := r.Client.Get(ctx, namespacedName, configMap)
+	if err != nil {
+		return fmt.Errorf("failed to get ConfigMap: %v", err)
+	}
+	// Define the desired StatefulSet
 
 	// Fetch the existing StatefulSet
 	existingStatefulSet := &appsv1.StatefulSet{}
-	err := r.Get(ctx, client.ObjectKey{Name: statefulSetName, Namespace: r.genAIDeployment.Namespace}, existingStatefulSet)
+	err = r.Get(ctx, client.ObjectKey{Name: statefulSetName, Namespace: r.genAIDeployment.Namespace}, existingStatefulSet)
 	if err != nil {
 		if client.IgnoreNotFound(err) != nil {
 			return err
 		}
 
 		// StatefulSet does not exist, so create it
-		if err := r.Create(ctx, generateDesiredStatefulSet(r.genAIDeployment, labels)); err != nil {
-			//r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "CreateStatefulSetFailed", fmt.Sprintf("Failed to create StatefulSet: %v", err))
+		if err := r.Create(ctx, generateDesiredStatefulSet(r.genAIDeployment, configMap, labels)); err != nil {
+			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "CreateStatefulSetFailed", fmt.Sprintf("Failed to create StatefulSet: %v", err))
 			return fmt.Errorf("failed to create StatefulSet: %w", err)
 		}
-		//r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "CreatedStatefulSet", fmt.Sprintf("Successfully created StatefulSet %s", statefulSetName))
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "CreatedStatefulSet", fmt.Sprintf("Successfully created StatefulSet %s", statefulSetName))
 		return nil
 	}
 
@@ -244,16 +267,80 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 
 			// Check and update environment variables, volume mounts, and ports
 			existingStatefulSet.Spec.Template.Spec.Containers[i].Env = []corev1.EnvVar{
-				{Name: "CLUSTER_BASIC_AUTH_USERNAME", ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "weaviate-cluster-api-basic-auth"},
-						Key:                  "username",
-					}}},
-				{Name: "CLUSTER_BASIC_AUTH_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "weaviate-cluster-api-basic-auth"},
-						Key:                  "password",
-					}}},
+				{
+					Name:  "AUTHENTICATION_APIKEY_ENABLED",
+					Value: "false",
+				},
+				{
+					Name:  "CLUSTER_DATA_BIND_PORT",
+					Value: "7001",
+				},
+				{
+					Name:  "CLUSTER_GOSSIP_BIND_PORT",
+					Value: "7000",
+				},
+				{
+					Name:  "GOGC",
+					Value: "100",
+				},
+				{
+					Name:  "PROMETHEUS_MONITORING_ENABLED",
+					Value: "false",
+				},
+				{
+					Name:  "PROMETHEUS_MONITORING_GROUP",
+					Value: "false",
+				},
+				{
+					Name:  "QUERY_MAXIMUM_RESULTS",
+					Value: "100000",
+				},
+				{
+					Name:  "REINDEX_VECTOR_DIMENSIONS_AT_STARTUP",
+					Value: "false",
+				},
+				{
+					Name:  "TRACK_VECTOR_DIMENSIONS",
+					Value: "false",
+				},
+				{
+					Name: "CLUSTER_BASIC_AUTH_USERNAME",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: r.genAIDeployment.Spec.VectorDbService.SecretRef.Name,
+							},
+							Key: "username",
+						},
+					},
+				},
+				{
+					Name: "CLUSTER_BASIC_AUTH_PASSWORD",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: r.genAIDeployment.Spec.VectorDbService.SecretRef.Name,
+							},
+							Key: "password",
+						},
+					},
+				},
+				{
+					Name:  "PERSISTENCE_DATA_PATH",
+					Value: "/var/lib/weaviate",
+				},
+				{
+					Name:  "DEFAULT_VECTORIZER_MODULE",
+					Value: "", // Set to an empty string if no default value
+				},
+				{
+					Name:  "RAFT_JOIN",
+					Value: "weaviate-0",
+				},
+				{
+					Name:  "RAFT_BOOTSTRAP_EXPECT",
+					Value: "1",
+				},
 			}
 
 			existingStatefulSet.Spec.Template.Spec.Containers[i].VolumeMounts = []corev1.VolumeMount{
@@ -275,6 +362,11 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 			updated = true
 		}
 	}
+	updated, err = r.CheckIfStatefulSetUpdateRequired(configMap, existingStatefulSet)
+	if err != nil {
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeNormal, "UpdateStatefulSetFailed", fmt.Sprintf("Failed to get configmap for StatefulSet: %v", err))
+		return err
+	}
 
 	if updated {
 		// Update only the fields within spec.template
@@ -291,7 +383,20 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 }
 
 // Helper function to generate the desired StatefulSet
-func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, labels map[string]string) *appsv1.StatefulSet {
+func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, configMap *corev1.ConfigMap, labels map[string]string) *appsv1.StatefulSet {
+	trueValue := true
+	runAsUser := int64(0)
+	securityContext := &corev1.SecurityContext{
+		RunAsUser:  &runAsUser,
+		Privileged: &trueValue,
+	}
+
+	checksum, err := CalculateChecksum(configMap)
+	if err != nil {
+		//log.Error(err, "Failed to calculate checksum for ConfigMap")
+		checksum = ""
+	}
+
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "weaviate",
@@ -310,26 +415,138 @@ func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, 
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
+			PodManagementPolicy: appsv1.ParallelPodManagement,
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
+					Annotations: map[string]string{
+						"checksum/confgig": checksum,
+					},
 				},
 				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Name:            "configure-sysctl",
+							SecurityContext: securityContext,
+							Image:           "docker.io/alpine:latest",
+							Command: []string{
+								"sysctl",
+								"-w",
+								"vm.max_map_count=524288",
+								"vm.overcommit_memory=1",
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("100m"),
+									corev1.ResourceMemory: resource.MustParse("64Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("100m"),
+									corev1.ResourceMemory: resource.MustParse("64Mi"),
+								},
+							},
+						},
+					},
 					Containers: []corev1.Container{
 						{
-							Name:  "weaviate",
-							Image: genAIDeployment.Spec.VectorDbService.Image,
+							Name:    "weaviate",
+							Image:   genAIDeployment.Spec.VectorDbService.Image,
+							Command: []string{"/bin/weaviate"},
+							Args: []string{
+								"--host",
+								"0.0.0.0",
+								"--port",
+								"8080",
+								"--scheme",
+								"http",
+								"--config-file",
+								"/weaviate-config/conf.yaml",
+								"--read-timeout=60s",
+								"--write-timeout=60s",
+							},
 							Env: []corev1.EnvVar{
-								{Name: "CLUSTER_BASIC_AUTH_USERNAME", ValueFrom: &corev1.EnvVarSource{
-									SecretKeyRef: &corev1.SecretKeySelector{
-										LocalObjectReference: corev1.LocalObjectReference{Name: "weaviate-cluster-api-basic-auth"},
-										Key:                  "username",
-									}}},
-								{Name: "CLUSTER_BASIC_AUTH_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-									SecretKeyRef: &corev1.SecretKeySelector{
-										LocalObjectReference: corev1.LocalObjectReference{Name: "weaviate-cluster-api-basic-auth"},
-										Key:                  "password",
-									}}},
+								{
+									Name:  "AUTHENTICATION_APIKEY_ENABLED",
+									Value: "false",
+								},
+								{
+									Name:  "CLUSTER_DATA_BIND_PORT",
+									Value: "7001",
+								},
+								{
+									Name:  "CLUSTER_GOSSIP_BIND_PORT",
+									Value: "7000",
+								},
+								{
+									Name:  "GOGC",
+									Value: "100",
+								},
+								{
+									Name:  "PROMETHEUS_MONITORING_ENABLED",
+									Value: "false",
+								},
+								{
+									Name:  "PROMETHEUS_MONITORING_GROUP",
+									Value: "false",
+								},
+								{
+									Name:  "QUERY_MAXIMUM_RESULTS",
+									Value: "100000",
+								},
+								{
+									Name:  "REINDEX_VECTOR_DIMENSIONS_AT_STARTUP",
+									Value: "false",
+								},
+								{
+									Name:  "TRACK_VECTOR_DIMENSIONS",
+									Value: "false",
+								},
+								{
+									Name: "CLUSTER_BASIC_AUTH_USERNAME",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: genAIDeployment.Spec.VectorDbService.SecretRef.Name,
+											},
+											Key: "username",
+										},
+									},
+								},
+								{
+									Name: "CLUSTER_BASIC_AUTH_PASSWORD",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: genAIDeployment.Spec.VectorDbService.SecretRef.Name,
+											},
+											Key: "password",
+										},
+									},
+								},
+								{
+									Name:  "PERSISTENCE_DATA_PATH",
+									Value: "/var/lib/weaviate",
+								},
+								{
+									Name:  "DEFAULT_VECTORIZER_MODULE",
+									Value: "", // Set to an empty string if no default value
+								},
+								{
+									Name:  "RAFT_JOIN",
+									Value: "weaviate-0",
+								},
+								{
+									Name:  "RAFT_BOOTSTRAP_EXPECT",
+									Value: "1",
+								},
+								{
+									Name:  "ENABLE_MODULES",
+									Value: "text2vec-cohere,text2vec-huggingface,text2vec-openai,generative-openai,generative-cohere",
+								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
@@ -345,6 +562,32 @@ func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, 
 								{ContainerPort: 8080},
 								{Name: "grpc", ContainerPort: 50051, Protocol: corev1.ProtocolTCP},
 							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/v1/.well-known/live",
+										Port: intstr.FromInt(8080),
+									},
+								},
+								InitialDelaySeconds: 900,
+								PeriodSeconds:       10,
+								TimeoutSeconds:      30,
+								SuccessThreshold:    1,
+								FailureThreshold:    3,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/v1/.well-known/ready",
+										Port: intstr.FromInt(8080),
+									},
+								},
+								InitialDelaySeconds: 3,
+								PeriodSeconds:       10,
+								TimeoutSeconds:      3,
+								SuccessThreshold:    1,
+								FailureThreshold:    3,
+							},
 						},
 					},
 					Volumes: []corev1.Volume{
@@ -353,7 +596,7 @@ func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, 
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: "weaviate-config", // Name of the ConfigMap
+										Name: "weaviate-config",
 									},
 								},
 							},
@@ -362,7 +605,28 @@ func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, 
 							Name: "weaviate-data",
 							VolumeSource: corev1.VolumeSource{
 								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: "weaviate-data", // PVC name for the data volume
+									ClaimName: "weaviate-data",
+								},
+							},
+						},
+					},
+					Affinity: &corev1.Affinity{
+						PodAntiAffinity: &corev1.PodAntiAffinity{
+							PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
+								{
+									Weight: 1,
+									PodAffinityTerm: corev1.PodAffinityTerm{
+										LabelSelector: &metav1.LabelSelector{
+											MatchExpressions: []metav1.LabelSelectorRequirement{
+												{
+													Key:      "app",
+													Operator: metav1.LabelSelectorOpIn,
+													Values:   []string{"weaviate"},
+												},
+											},
+										},
+										TopologyKey: "kubernetes.io/hostname",
+									},
 								},
 							},
 						},
@@ -548,4 +812,57 @@ func (r *vectorDbReconcilerImpl) ReconcilePVC(ctx context.Context) error {
 	// If the PVC exists, do nothing (or handle any potential updates if required)
 
 	return nil
+}
+
+// CalculateChecksum calculates a SHA256 checksum for the given ConfigMap.
+func CalculateChecksum(configMap *corev1.ConfigMap) (string, error) {
+	if configMap == nil {
+		return "", fmt.Errorf("ConfigMap is nil")
+	}
+
+	var sb strings.Builder
+	keys := make([]string, 0, len(configMap.Data))
+	for key := range configMap.Data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		sb.WriteString(key)
+		sb.WriteString(configMap.Data[key])
+	}
+
+	hash := sha256.New()
+	_, err := hash.Write([]byte(sb.String()))
+	if err != nil {
+		return "", fmt.Errorf("failed to compute checksum: %v", err)
+	}
+
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// CheckIfStatefulSetUpdateRequired checks if the ConfigMap has changed and returns whether an update is required and the new StatefulSet.
+
+func (r *vectorDbReconcilerImpl) CheckIfStatefulSetUpdateRequired(configMap *corev1.ConfigMap, statefulSet *appsv1.StatefulSet) (bool, error) {
+	// Calculate the checksum of the ConfigMap
+	newChecksum, err := CalculateChecksum(configMap)
+	if err != nil {
+		return false, fmt.Errorf("failed to calculate checksum: %v", err)
+	}
+
+	// Check the existing checksum in the StatefulSet template annotations
+	existingChecksum, ok := statefulSet.Spec.Template.Annotations["checksum/config"]
+	if !ok || existingChecksum != newChecksum {
+		// Update the StatefulSet annotations and set update field to true
+		if statefulSet.Spec.Template.Annotations == nil {
+			statefulSet.Spec.Template.Annotations = make(map[string]string)
+		}
+		statefulSet.Spec.Template.Annotations["checksum/config"] = newChecksum
+		// Assuming `update` is a custom annotation field to trigger the update
+		statefulSet.Spec.Template.Annotations["update"] = "true"
+
+		return true, nil
+	}
+
+	return false, nil
 }

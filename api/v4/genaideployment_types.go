@@ -65,7 +65,7 @@ type WorkerGroup struct {
 	Resources      corev1.ResourceRequirements `json:"resources"` // Resource requirements for the container (CPU, Memory)
 	Replicas       int32                       `json:"replicas,omitempty"`
 	RayStartParams map[string]string           `json:"rayStartParams,omitempty"` // Parameters for the worker group
-	Affinity                  *corev1.Affinity                   `json:"affinity"`                            // Kubernetes Affinity rules that control how pods are assigned to particular nodes.
+	Affinity       *corev1.Affinity            `json:"affinity"`                 // Kubernetes Affinity rules that control how pods are assigned to particular nodes.
 }
 
 // RayServiceSpec defines the Ray service configuration
