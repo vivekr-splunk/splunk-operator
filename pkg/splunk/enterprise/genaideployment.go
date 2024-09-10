@@ -22,8 +22,8 @@ import (
 
 	//promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	enterpriseApi "github.com/vivekrsplunk/splunk-operator/api/v4"
-	splcommon "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/common"
-	genai "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/genai"
+	splcommon "github.com/vivekrsplunk/splunk-operator/pkg/splunk/common"
+	genai "github.com/vivekrsplunk/splunk-operator/pkg/splunk/genai"
 
 	//"gopkg.in/yaml.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

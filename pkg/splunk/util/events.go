@@ -21,7 +21,7 @@ import (
 	enterpriseApi "github.com/vivekrsplunk/splunk-operator/api/v4"
 
 	enterpriseApiV3 "github.com/vivekrsplunk/splunk-operator/api/v3"
-	splcommon "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/common"
+	splcommon "github.com/vivekrsplunk/splunk-operator/pkg/splunk/common"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )

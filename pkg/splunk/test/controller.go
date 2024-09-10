@@ -35,7 +35,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	splcommon "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/common"
+	splcommon "github.com/vivekrsplunk/splunk-operator/pkg/splunk/common"
 )
 
 func init() {

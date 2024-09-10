@@ -26,7 +26,7 @@ import (
 	"strings"
 	"testing"
 
-	splcommon "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/common"
+	splcommon "github.com/vivekrsplunk/splunk-operator/pkg/splunk/common"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/remotecommand"

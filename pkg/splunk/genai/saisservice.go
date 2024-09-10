@@ -144,7 +144,7 @@ func (r *saisServiceReconcilerImpl) ReconcileSecret(ctx context.Context) error {
 			r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to create Secret: %v", err))
 			return fmt.Errorf("failed to create Secret: %w", err)
 		}
-	} 
+	}
 	return nil
 }
 
@@ -158,13 +158,13 @@ func (r *saisServiceReconcilerImpl) ReconcileConfigMap(ctx context.Context) erro
 			},
 		},
 		Data: map[string]string{
-			"IAC_URL":          "auth.playground.scs.splunk.com",
-			"API_GATEWAY_URL":  "api.playground.scs.splunk.com",
-			"PLATFORM_URL":     "ml-platform-cyclops.dev.svc.splunk8s.io",
-			"TELEMETRY_URL":    "https://telemetry-splkmobile.kube-bridger",
-			"TELEMETRY_ENV":    "",
-			"TELEMETRY_REGION": "region-iad10",
-			"ENABLE_AUTHZ":     "false",
+			"IAC_URL":             "auth.playground.scs.splunk.com",
+			"API_GATEWAY_URL":     "api.playground.scs.splunk.com",
+			"PLATFORM_URL":        "ml-platform-cyclops.dev.svc.splunk8s.io",
+			"TELEMETRY_URL":       "https://telemetry-splkmobile.kube-bridger",
+			"TELEMETRY_ENV":       "",
+			"TELEMETRY_REGION":    "region-iad10",
+			"ENABLE_AUTHZ":        "false",
 			"AUTH_PROVIDER":       "",
 			"SCPAUTH_SECRET_PATH": "/etc/sais-service-secret",
 		},
@@ -500,47 +500,43 @@ func (r *saisServiceReconcilerImpl) ReconcileService(ctx context.Context) error 
 	return nil
 }
 
-
-
 // AddEnvVarsFromSecretToDeployment adds environment variables from a secret to a deployment's container
-func (r *saisServiceReconcilerImpl) AddEnvVarsFromSecretToDeployment(ctx context.Context,  deployment *appsv1.Deployment, secretName, containerName string) error {
-	
+func (r *saisServiceReconcilerImpl) AddEnvVarsFromSecretToDeployment(ctx context.Context, deployment *appsv1.Deployment, secretName, containerName string) error {
+
 	namespacedName := types.NamespacedName{
-        Namespace: r.genAIDeployment.Namespace,
-        Name:      secretName,
-    }
+		Namespace: r.genAIDeployment.Namespace,
+		Name:      secretName,
+	}
 	secret := &corev1.Secret{}
-    // Fetch the secret
-    err := r.Get(ctx, namespacedName, secret)
-    if err != nil {
-        return fmt.Errorf("failed to get secret: %v", err)
-    }
-	
-    // Find the specified container
-    var container *corev1.Container
-    for i := range deployment.Spec.Template.Spec.Containers {
-        if deployment.Spec.Template.Spec.Containers[i].Name == containerName {
-            container = &deployment.Spec.Template.Spec.Containers[i]
-            break
-        }
-    }
-    if container == nil {
-        return fmt.Errorf("container %s not found", containerName)
-    }
+	// Fetch the secret
+	err := r.Get(ctx, namespacedName, secret)
+	if err != nil {
+		return fmt.Errorf("failed to get secret: %v", err)
+	}
 
-    // Add environment variables from the secret
-    envVars := []corev1.EnvVar{}
-    for key, value := range secret.Data {
-        envVars = append(envVars, corev1.EnvVar{
-            Name:  key,
-            Value: string(value),
-        })
-    }
-    container.Env = append(container.Env, envVars...)
-    return nil
+	// Find the specified container
+	var container *corev1.Container
+	for i := range deployment.Spec.Template.Spec.Containers {
+		if deployment.Spec.Template.Spec.Containers[i].Name == containerName {
+			container = &deployment.Spec.Template.Spec.Containers[i]
+			break
+		}
+	}
+	if container == nil {
+		return fmt.Errorf("container %s not found", containerName)
+	}
+
+	// Add environment variables from the secret
+	envVars := []corev1.EnvVar{}
+	for key, value := range secret.Data {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  key,
+			Value: string(value),
+		})
+	}
+	container.Env = append(container.Env, envVars...)
+	return nil
 }
-
-
 
 // Helper function to get the ServiceAccountName if provided, or return an empty string
 func getServiceAccountName(serviceAccount string) string {
