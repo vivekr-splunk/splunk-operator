@@ -17,6 +17,7 @@ data:
   SAIA_API_VERSION: "v1"
   PLATFORM_VERSION: "v1"
   AUTH_PROVIDER: ""
+  ENABLE_AUTHN: "false"
 
 ---
 apiVersion: v1
@@ -30,8 +31,8 @@ type: Opaque
 data:
   username: YWRtaW4=  # Base64 encoded 'admin'
   password: c2VjcmV0  # Base64 encoded 'secret'
-  AWS_ACCESS_KEY_ID: QUtJQVpXNkVDWkVJM0JVNVFBNFE=
-  AWS_SECRET_ACCESS_KEY: MkR6TkZ4Zk90MGdzRDFyVTk1WGtNWDMrN0Z3YlZ0bW1PL2FQTmIxQg==
+  AWS_ACCESS_KEY_ID: YWRtaW4=
+  AWS_SECRET_ACCESS_KEY: YWRtaW4=
   AWS_SECURITY_TOKEN: YWRtaW4=
   AWS_SESSION_TOKEN: YWRtaW4=
 
