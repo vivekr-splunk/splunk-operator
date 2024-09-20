@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	//"sigs.k8s.io/controller-runtime/pkg/source"
-	//enterprise "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/enterprise"
+	enterprise "github.com/vivekrsplunk/splunk-operator/pkg/splunk/enterprise"
 )
 
 // SearchHeadClusterReconciler reconciles a SearchHeadCluster object
@@ -112,8 +112,8 @@ func (r *SearchHeadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 // ApplySearchHeadCluster adding to handle unit test case
 var ApplySearchHeadCluster = func(ctx context.Context, client client.Client, instance *enterpriseApi.SearchHeadCluster) (reconcile.Result, error) {
-	return reconcile.Result{}, nil
-	//return enterprise.ApplySearchHeadCluster(ctx, client, instance)
+	//return reconcile.Result{}, nil
+	return enterprise.ApplySearchHeadCluster(ctx, client, instance)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -133,28 +133,28 @@ func (r *SearchHeadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.SearchHeadCluster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.Secret{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.SearchHeadCluster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.ConfigMap{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.SearchHeadCluster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.Pod{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.SearchHeadCluster{},
 				handler.OnlyControllerOwner(),
 			)).
 		WithOptions(controller.Options{

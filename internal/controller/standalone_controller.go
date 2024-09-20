@@ -30,7 +30,7 @@ import (
 
 	"github.com/pkg/errors"
 	common "github.com/vivekrsplunk/splunk-operator/internal/controller/common"
-	//enterprise "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/enterprise"
+	enterprise "github.com/vivekrsplunk/splunk-operator/pkg/splunk/enterprise"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -117,8 +117,8 @@ func (r *StandaloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 // ApplyStandalone adding to handle unit test case
 var ApplyStandalone = func(ctx context.Context, client client.Client, instance *enterpriseApi.Standalone) (reconcile.Result, error) {
-	return reconcile.Result{}, nil
-	//return enterprise.ApplyStandalone(ctx, client, instance)
+	//return reconcile.Result{}, nil
+	return enterprise.ApplyStandalone(ctx, client, instance)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -139,28 +139,28 @@ func (r *StandaloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.Standalone{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.Secret{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.Standalone{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.ConfigMap{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.Standalone{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.Pod{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.Standalone{},
 				handler.OnlyControllerOwner(),
 			)).
 		WithOptions(controller.Options{

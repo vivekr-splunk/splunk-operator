@@ -25,7 +25,7 @@ import (
 	"github.com/pkg/errors"
 	enterpriseApiV3 "github.com/vivekrsplunk/splunk-operator/api/v3"
 	common "github.com/vivekrsplunk/splunk-operator/internal/controller/common"
-	//enterprise "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/enterprise"
+	enterprise "github.com/vivekrsplunk/splunk-operator/pkg/splunk/enterprise"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -113,12 +113,12 @@ func (r *IndexerClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 // ApplyIndexerCluster adding to handle unit test case
 var ApplyIndexerCluster = func(ctx context.Context, client client.Client, instance *enterpriseApi.IndexerCluster) (reconcile.Result, error) {
-	return reconcile.Result{}, nil
+	//return reconcile.Result{}, nil
 	// IdxCluster can be supported by two CRD types for CM
 	//if len(instance.Spec.ClusterManagerRef.Name) > 0 {
 	//	return enterprise.ApplyIndexerClusterManager(ctx, client, instance)
 	//}
-	//return enterprise.ApplyIndexerCluster(ctx, client, instance)
+	return enterprise.ApplyIndexerCluster(ctx, client, instance)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -140,42 +140,42 @@ func (r *IndexerClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.IndexerCluster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.Secret{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.IndexerCluster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.Pod{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.IndexerCluster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.ConfigMap{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.IndexerCluster{},
 				handler.OnlyControllerOwner(),
 			)).
-		Watches(&enterpriseApi.ClusterManager{},
+		Watches(&enterpriseApi.IndexerCluster{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.IndexerCluster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&enterpriseApiV3.ClusterMaster{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApi.IndexerCluster{},
 				handler.OnlyControllerOwner(),
 			)).
 		WithOptions(controller.Options{

@@ -25,7 +25,7 @@ import (
 	"github.com/pkg/errors"
 	enterpriseApiV3 "github.com/vivekrsplunk/splunk-operator/api/v3"
 	common "github.com/vivekrsplunk/splunk-operator/internal/controller/common"
-	//enterprise "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/enterprise"
+	enterprise "github.com/vivekrsplunk/splunk-operator/pkg/splunk/enterprise"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -114,8 +114,8 @@ func (r *ClusterMasterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 // ApplyClusterMaster adding to handle unit test case
 var ApplyClusterMaster = func(ctx context.Context, client client.Client, instance *enterpriseApiV3.ClusterMaster) (reconcile.Result, error) {
-	return reconcile.Result{}, nil
-	//return enterprise.ApplyClusterMaster(ctx, client, instance)
+	//return reconcile.Result{}, nil
+	return enterprise.ApplyClusterMaster(ctx, client, instance)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -136,28 +136,28 @@ func (r *ClusterMasterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApiV3.ClusterMaster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.Secret{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApiV3.ClusterMaster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.Pod{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApiV3.ClusterMaster{},
 				handler.OnlyControllerOwner(),
 			)).
 		Watches(&corev1.ConfigMap{},
 			handler.EnqueueRequestForOwner(
 				mgr.GetScheme(),
 				mgr.GetRESTMapper(),
-				&enterpriseApi.ClusterManager{},
+				&enterpriseApiV3.ClusterMaster{},
 				handler.OnlyControllerOwner(),
 			)).
 		WithOptions(controller.Options{

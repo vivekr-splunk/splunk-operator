@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -202,6 +203,7 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 		"team":       "ml",
 		"version":    "v1alpha1",
 		"deployment": r.genAIDeployment.Name,
+		"component": r.genAIDeployment.Name,
 	}
 
 	// Define node selector and tolerations for GPU support
@@ -229,6 +231,22 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 		"prometheus.io/port":               "8080",
 		"prometheus.io/path":               "/metrics",
 		"prometheus.io/scheme":             "http",
+	}
+	
+	if r.genAIDeployment.Spec.ServiceAccount != "" {
+		serviceAccount := &corev1.ServiceAccount{}
+		namespacedName := types.NamespacedName{
+			Name: r.genAIDeployment.Spec.ServiceAccount,
+			Namespace : r.genAIDeployment.GetNamespace(),
+		}
+		err := r.Client.Get(ctx, namespacedName, serviceAccount)
+		if err != nil {
+			return err
+		}
+		value, exists := serviceAccount.Annotations["iam.amazonaws.com/role"] 
+		if exists {
+			annotations["iam.amazonaws.com/role"] = value 
+		}
 	}
 
 	// Set the "iam.amazonaws.com/role" only if AWS_ROLE_ARN is not empty
@@ -329,6 +347,11 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 							Env:       configMapEnvVars, // Use the desired environment variables
 							Command:   []string{"python"},
 							Args:      []string{"-m", "uvicorn", "--host", "0.0.0.0", "server.main:app", "--port", "8080"},
+							Ports: []corev1.ContainerPort{ // Add the port mapping
+								{
+									ContainerPort: 8080,
+								},
+							},
 							/*VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      r.genAIDeployment.Spec.SaisService.Volume.Name,
@@ -466,15 +489,34 @@ func (r *saisServiceReconcilerImpl) ReconcileService(ctx context.Context) error 
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),
 			},
+			Annotations: map[string]string{
+				"gateway-v1-openapi3": "enabled",
+				"gateway.splunk8s.io/external-name": "saia-api",
+				"gateway.splunk8s.io/recommendedVersion": "v1alpha1",
+				"gateway.splunk8s.io/service-name": "saia-api",
+				"gateway.splunk8s.io/versions": "v1alpha1",
+				"prometheus.io/port": "8080",
+				"prometheus.io/path": "/metrics",
+				"prometheus.io/scheme": "http",
+			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
 				"app":        "sais-service",
 				"deployment": r.genAIDeployment.Name,
+				"component": r.genAIDeployment.Name,
 			},
 			Ports: []corev1.ServicePort{
 				{
+					Name: "http-saia-api",
+					TargetPort: intstr.FromInt(8080),
 					Port:     80,
+					Protocol: corev1.ProtocolTCP,
+				},
+				{
+					Name: "http-saia-api-gateway8443",
+					TargetPort: intstr.FromInt(8080),
+					Port:     8443,
 					Protocol: corev1.ProtocolTCP,
 				},
 			},

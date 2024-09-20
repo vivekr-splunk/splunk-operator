@@ -23,7 +23,7 @@ import (
 
 	"github.com/pkg/errors"
 	common "github.com/vivekrsplunk/splunk-operator/internal/controller/common"
-	//enterprise "github.com/vivekrsplunk/splunk-operator/internal/pkg/splunk/enterprise"
+	enterprise "github.com/vivekrsplunk/splunk-operator/pkg/splunk/enterprise"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -111,8 +111,7 @@ func (r *ClusterManagerReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 // ApplyClusterManager adding to handle unit test case
 var ApplyClusterManager = func(ctx context.Context, client client.Client, instance *enterpriseApi.ClusterManager) (reconcile.Result, error) {
-	return reconcile.Result{}, nil
-	//return enterprise.ApplyClusterManager(ctx, client, instance)
+	return enterprise.ApplyClusterManager(ctx, client, instance)
 }
 
 // SetupWithManager sets up the controller with the Manager.
