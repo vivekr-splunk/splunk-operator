@@ -167,6 +167,7 @@ func (r *saisServiceReconcilerImpl) ReconcileConfigMap(ctx context.Context) erro
 			"TELEMETRY_REGION":    "region-iad10",
 			"ENABLE_AUTHZ":        "false",
 			"AUTH_PROVIDER":       "",
+			"SCS_TOKEN" :          "your-scs-token",
 			"SCPAUTH_SECRET_PATH": "/etc/sais-service-secret",
 		},
 	}
@@ -300,6 +301,11 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
 				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
 				Key:                  "SCPAUTH_SECRET_PATH",
+			}}},
+		{Name: "SCS_TOKEN", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "SCS_TOKEN",
 			}}},
 		{Name: "S3_BUCKET", Value: s3Bucket}, //FIXME
 	}
@@ -502,7 +508,7 @@ func (r *saisServiceReconcilerImpl) ReconcileService(ctx context.Context) error 
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				"app":        "sais-service",
+				"app":        "saia-api",
 				"deployment": r.genAIDeployment.Name,
 				"component": r.genAIDeployment.Name,
 			},
