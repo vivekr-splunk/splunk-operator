@@ -396,7 +396,7 @@ func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, 
 		//log.Error(err, "Failed to calculate checksum for ConfigMap")
 		checksum = ""
 	}
-
+	serviceName := fmt.Sprintf("weaviate-headless.%s.svc.cluster.local", genAIDeployment.Namespace)
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "weaviate",
@@ -546,6 +546,10 @@ func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, 
 								{
 									Name:  "ENABLE_MODULES",
 									Value: "text2vec-cohere,text2vec-huggingface,text2vec-openai,generative-openai,generative-cohere",
+								},
+								{
+									Name:  "CLUSTER_JOIN",
+									Value: serviceName,
 								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
