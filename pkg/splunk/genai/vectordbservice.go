@@ -537,11 +537,11 @@ func generateDesiredStatefulSet(genAIDeployment *enterpriseApi.GenAIDeployment, 
 								},
 								{
 									Name:  "RAFT_JOIN",
-									Value: "weaviate-0",
+									Value: "weaviate-0,weaviate-1,weaviate-2",
 								},
 								{
 									Name:  "RAFT_BOOTSTRAP_EXPECT",
-									Value: "1",
+									Value: "3",
 								},
 								{
 									Name:  "ENABLE_MODULES",
