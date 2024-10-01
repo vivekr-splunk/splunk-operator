@@ -26,6 +26,73 @@ type SaisServiceReconciler interface {
 	ReconcileService(ctx context.Context) error
 }
 
+// addCACertVolumeAndMount adds a CA certificate volume and mount to the deployment if the key exists in the ConfigMap.
+func (r *saisServiceReconcilerImpl) addCACertVolumeAndMount(ctx context.Context, deployment *appsv1.Deployment) error {
+	configMap := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: "sais-service-config", Namespace: r.genAIDeployment.Namespace}, configMap)
+	if err != nil {
+		return fmt.Errorf("failed to get ConfigMap: %w", err)
+	}
+
+	// Check if the CA certificate key exists in the ConfigMap
+	if _, exists := configMap.Data["CA_CERT"]; exists {
+		// Define the volume for the CA certificate
+		caCertVolume := corev1.Volume{
+			Name: "ca-cert",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: "sais-service-config",
+					},
+					Items: []corev1.KeyToPath{
+						{
+							Key:  "CA_CERT",
+							Path: "ca.crt",
+						},
+					},
+				},
+			},
+		}
+
+		// Define the volume mount for the CA certificate
+		caCertVolumeMount := corev1.VolumeMount{
+			Name:      "ca-cert",
+			MountPath: "/etc/ssl/certs/ca-certificates.crt",
+			SubPath:   "ca.crt",
+			ReadOnly:  true,
+		}
+
+		// Check if the volume already exists; if not, add it
+		volumeExists := false
+		for _, volume := range deployment.Spec.Template.Spec.Volumes {
+			if volume.Name == "ca-cert" {
+				volumeExists = true
+				break
+			}
+		}
+		if !volumeExists {
+			deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, caCertVolume)
+		}
+
+		// Attach the volume mount to the first container in the deployment
+		if len(deployment.Spec.Template.Spec.Containers) > 0 {
+			container := &deployment.Spec.Template.Spec.Containers[0]
+			volumeMountExists := false
+			for _, mount := range container.VolumeMounts {
+				if mount.Name == "ca-cert" {
+					volumeMountExists = true
+					break
+				}
+			}
+			if !volumeMountExists {
+				container.VolumeMounts = append(container.VolumeMounts, caCertVolumeMount)
+			}
+		}
+	}
+
+	return nil
+}
+
 // saisServiceReconcilerImpl is the concrete implementation of SaisServiceReconciler.
 type saisServiceReconcilerImpl struct {
 	client.Client
@@ -167,8 +234,12 @@ func (r *saisServiceReconcilerImpl) ReconcileConfigMap(ctx context.Context) erro
 			"TELEMETRY_REGION":    "region-iad10",
 			"ENABLE_AUTHZ":        "false",
 			"AUTH_PROVIDER":       "",
-			"SCS_TOKEN" :          "your-scs-token",
+			"SAIA_API_VERSION": 	"0.1.0",
+			"PLATFORM_VERSION": 	"0.2.20",
+			"SCS_TOKEN":           "admin-secret-key",
 			"SCPAUTH_SECRET_PATH": "/etc/sais-service-secret",
+			"SSL_CERT_FILE": "/usr/local/share/ca-certificates/ca.cert",
+			"SSL_CERT_DIR": "/usr/local/share/ca-certificates",
 		},
 	}
 
@@ -204,7 +275,7 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 		"team":       "ml",
 		"version":    "v1alpha1",
 		"deployment": r.genAIDeployment.Name,
-		"component": r.genAIDeployment.Name,
+		"component":  r.genAIDeployment.Name,
 	}
 
 	// Define node selector and tolerations for GPU support
@@ -233,20 +304,20 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 		"prometheus.io/path":               "/metrics",
 		"prometheus.io/scheme":             "http",
 	}
-	
+
 	if r.genAIDeployment.Spec.ServiceAccount != "" {
 		serviceAccount := &corev1.ServiceAccount{}
 		namespacedName := types.NamespacedName{
-			Name: r.genAIDeployment.Spec.ServiceAccount,
-			Namespace : r.genAIDeployment.GetNamespace(),
+			Name:      r.genAIDeployment.Spec.ServiceAccount,
+			Namespace: r.genAIDeployment.GetNamespace(),
 		}
 		err := r.Client.Get(ctx, namespacedName, serviceAccount)
 		if err != nil {
 			return err
 		}
-		value, exists := serviceAccount.Annotations["iam.amazonaws.com/role"] 
+		value, exists := serviceAccount.Annotations["iam.amazonaws.com/role"]
 		if exists {
-			annotations["iam.amazonaws.com/role"] = value 
+			annotations["iam.amazonaws.com/role"] = value
 		}
 	}
 
@@ -306,6 +377,26 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
 				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
 				Key:                  "SCS_TOKEN",
+			}}},
+		{Name: "SSL_CERT_FILE", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "SSL_CERT_FILE",
+			}}},
+		{Name: "SSL_CERT_DIR", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "SSL_CERT_DIR",
+			}}},
+		{Name: "PLATFORM_VERSION", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "PLATFORM_VERSION",
+			}}},
+		{Name: "SAIA_API_VERSION", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: r.genAIDeployment.Spec.SaisService.ConfigMapRef,
+				Key:                  "SAIA_API_VERSION",
 			}}},
 		{Name: "S3_BUCKET", Value: s3Bucket}, //FIXME
 	}
@@ -369,6 +460,7 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 					Affinity:                  &r.genAIDeployment.Spec.SaisService.Affinity,
 					Tolerations:               tolerations,
 					TopologySpreadConstraints: r.genAIDeployment.Spec.SaisService.TopologySpreadConstraints,
+					HostAliases:               r.genAIDeployment.Spec.SaisService.HostAliases,
 				},
 			},
 		},
@@ -424,7 +516,14 @@ func (r *saisServiceReconcilerImpl) ReconcileDeployment(ctx context.Context) err
 		}
 	}
 
-	err := r.AddEnvVarsFromSecretToDeployment(ctx, deployment, secretName, "sais-container")
+	// Add CA certificate volume and mount if the key exists in the ConfigMap
+	err := r.AddCACertVolumeAndMount(ctx, deployment)
+	if err != nil {
+		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to add CA certificate volume and mount: %v", err))
+		return fmt.Errorf("failed to add CA certificate volume and mount: %w", err)
+	}
+
+	err = r.AddEnvVarsFromSecretToDeployment(ctx, deployment, secretName, "sais-container")
 	if err != nil {
 		r.eventRecorder.Event(r.genAIDeployment, corev1.EventTypeWarning, "ReconciliationError", fmt.Sprintf("Failed to add environment variables from secret: %v", err))
 		return fmt.Errorf("failed to add environment variables from secret: %w", err)
@@ -496,34 +595,34 @@ func (r *saisServiceReconcilerImpl) ReconcileService(ctx context.Context) error 
 				*metav1.NewControllerRef(r.genAIDeployment, enterpriseApi.GroupVersion.WithKind("GenAIDeployment")),
 			},
 			Annotations: map[string]string{
-				"gateway-v1-openapi3": "enabled",
-				"gateway.splunk8s.io/external-name": "saia-api",
+				"gateway-v1-openapi3":                    "enabled",
+				"gateway.splunk8s.io/external-name":      "saia-api",
 				"gateway.splunk8s.io/recommendedVersion": "v1alpha1",
-				"gateway.splunk8s.io/service-name": "saia-api",
-				"gateway.splunk8s.io/versions": "v1alpha1",
-				"prometheus.io/port": "8080",
-				"prometheus.io/path": "/metrics",
-				"prometheus.io/scheme": "http",
+				"gateway.splunk8s.io/service-name":       "saia-api",
+				"gateway.splunk8s.io/versions":           "v1alpha1",
+				"prometheus.io/port":                     "8080",
+				"prometheus.io/path":                     "/metrics",
+				"prometheus.io/scheme":                   "http",
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
 				"app":        "saia-api",
 				"deployment": r.genAIDeployment.Name,
-				"component": r.genAIDeployment.Name,
+				"component":  r.genAIDeployment.Name,
 			},
 			Ports: []corev1.ServicePort{
 				{
-					Name: "http-saia-api",
+					Name:       "http-saia-api",
 					TargetPort: intstr.FromInt(8080),
-					Port:     80,
-					Protocol: corev1.ProtocolTCP,
+					Port:       80,
+					Protocol:   corev1.ProtocolTCP,
 				},
 				{
-					Name: "http-saia-api-gateway8443",
+					Name:       "http-saia-api-gateway8443",
 					TargetPort: intstr.FromInt(8080),
-					Port:     8443,
-					Protocol: corev1.ProtocolTCP,
+					Port:       8443,
+					Protocol:   corev1.ProtocolTCP,
 				},
 			},
 		},
@@ -545,6 +644,73 @@ func (r *saisServiceReconcilerImpl) ReconcileService(ctx context.Context) error 
 			return fmt.Errorf("failed to update Service: %w", err)
 		}
 	}
+	return nil
+}
+
+func (r *saisServiceReconcilerImpl) AddCACertVolumeAndMount(ctx context.Context, deployment *appsv1.Deployment) error {
+	configMap := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: "sais-service-config", Namespace: r.genAIDeployment.Namespace}, configMap)
+	if err != nil {
+		return fmt.Errorf("failed to get ConfigMap: %w", err)
+	}
+
+	// Check if the CA certificate key exists in the ConfigMap
+	if _, exists := configMap.Data["ca.cert"]; exists {
+		// Define the volume for the CA certificate
+		caCertVolume := corev1.Volume{
+			Name: "ca-cert-volume",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: "sais-service-config",
+					},
+					Items: []corev1.KeyToPath{
+						{
+							Key:  "ca-cert",
+							Path: "ca.crt",
+						},
+					},
+				},
+			},
+		}
+
+		// Define the volume mount for the CA certificate
+		caCertVolumeMount := corev1.VolumeMount{
+			Name: "ca-cert",
+			//MountPath: "/etc/ssl/certs/ca-certificates.crt",
+			MountPath: "/usr/local/share/ca-certificates/ca.crt",
+			SubPath:   "ca.crt",
+			ReadOnly:  true,
+		}
+
+		// Check if the volume already exists; if not, add it
+		volumeExists := false
+		for _, volume := range deployment.Spec.Template.Spec.Volumes {
+			if volume.Name == "ca-cert" {
+				volumeExists = true
+				break
+			}
+		}
+		if !volumeExists {
+			deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, caCertVolume)
+		}
+
+		// Attach the volume mount to the first container in the deployment
+		if len(deployment.Spec.Template.Spec.Containers) > 0 {
+			container := &deployment.Spec.Template.Spec.Containers[0]
+			volumeMountExists := false
+			for _, mount := range container.VolumeMounts {
+				if mount.Name == "ca-cert" {
+					volumeMountExists = true
+					break
+				}
+			}
+			if !volumeMountExists {
+				container.VolumeMounts = append(container.VolumeMounts, caCertVolumeMount)
+			}
+		}
+	}
+
 	return nil
 }
 

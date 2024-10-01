@@ -264,12 +264,20 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 				existingStatefulSet.Spec.Template.Spec.Containers[i].Image = r.genAIDeployment.Spec.VectorDbService.Image
 				updated = true
 			}
-
+			serviceName := fmt.Sprintf("weaviate-headless.%s.svc.cluster.local", r.genAIDeployment.Namespace)
 			// Check and update environment variables, volume mounts, and ports
 			existingStatefulSet.Spec.Template.Spec.Containers[i].Env = []corev1.EnvVar{
 				{
 					Name:  "AUTHENTICATION_APIKEY_ENABLED",
-					Value: "false",
+					Value: "true",
+				},
+				{
+					Name:  "AUTHENTICATION_APIKEY_ALLOWED_KEYS",
+					Value: "admin-secret-key,vivekr-splunk-secret-key,vivekr-secret-key",
+				},
+				{
+					Name:  "AUTHENTICATION_APIKEY_USERS",
+					Value: "admin,vivekr@splunk.com.com,vivekr",
 				},
 				{
 					Name:  "CLUSTER_DATA_BIND_PORT",
@@ -303,28 +311,28 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 					Name:  "TRACK_VECTOR_DIMENSIONS",
 					Value: "false",
 				},
-				{
-					Name: "CLUSTER_BASIC_AUTH_USERNAME",
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: r.genAIDeployment.Spec.VectorDbService.SecretRef.Name,
-							},
-							Key: "username",
-						},
-					},
-				},
-				{
-					Name: "CLUSTER_BASIC_AUTH_PASSWORD",
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: r.genAIDeployment.Spec.VectorDbService.SecretRef.Name,
-							},
-							Key: "password",
-						},
-					},
-				},
+				//{
+				//	Name: "CLUSTER_BASIC_AUTH_USERNAME",
+				//	ValueFrom: &corev1.EnvVarSource{
+				//		SecretKeyRef: &corev1.SecretKeySelector{
+				//			LocalObjectReference: corev1.LocalObjectReference{
+				//				Name: r.genAIDeployment.Spec.VectorDbService.SecretRef.Name,
+				//			},
+				//			Key: "username",
+				//		},
+				//	},
+				//},
+				//{
+				//	Name: "CLUSTER_BASIC_AUTH_PASSWORD",
+				//	ValueFrom: &corev1.EnvVarSource{
+				//		SecretKeyRef: &corev1.SecretKeySelector{
+				//			LocalObjectReference: corev1.LocalObjectReference{
+				//				Name: r.genAIDeployment.Spec.VectorDbService.SecretRef.Name,
+				//			},
+				//			Key: "password",
+				//		},
+				//	},
+				//},
 				{
 					Name:  "PERSISTENCE_DATA_PATH",
 					Value: "/var/lib/weaviate",
@@ -335,11 +343,19 @@ func (r *vectorDbReconcilerImpl) ReconcileStatefulSet(ctx context.Context) error
 				},
 				{
 					Name:  "RAFT_JOIN",
-					Value: "weaviate-0",
+					Value: "weaviate-0,weaviate-1,weaviate-2",
 				},
 				{
 					Name:  "RAFT_BOOTSTRAP_EXPECT",
-					Value: "1",
+					Value: "3",
+				},
+				{
+					Name:  "ENABLE_MODULES",
+					Value: "text2vec-cohere,text2vec-huggingface,text2vec-openai,generative-openai,generative-cohere",
+				},
+				{
+					Name:  "CLUSTER_JOIN",
+					Value: serviceName,
 				},
 			}
 

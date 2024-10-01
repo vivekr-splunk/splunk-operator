@@ -154,7 +154,7 @@ docker-push: ## Push docker image with the manager.
 # - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
@@ -320,3 +320,23 @@ catalog-build: opm ## Build a catalog image.
 .PHONY: catalog-push
 catalog-push: ## Push a catalog image.
 	$(MAKE) docker-push IMG=$(CATALOG_IMG)
+
+# Files
+CA_CERT=certs/ca.crt
+
+create-tls-secret: $(CA_CERT)
+	# Generate Backend Key and CSR
+	openssl genrsa -out certs/tls.key 2048
+	openssl req -new -key certs/tls.key -subj "/CN=splunk-operator-system.svc.cluster.local" -out certs/tls.csr
+	# Sign the CSR with the CA Certificate
+	openssl x509 -req -in certs/tls.csr -CA $(CA_CERT) -CAkey certs/ca.key -CAcreateserial -out certs/tls.crt -days 500
+	# Create Kubernetes secret
+	kubectl delete secret backend-tls -n $(NAMESPACE) --ignore-not-found
+	kubectl create secret tls backend-tls --key certs/tls.key --cert certs/tls.crt -n $(NAMESPACE)
+
+$(CA_CERT):
+	# Generate CA Key and Certificate
+	openssl genrsa -out certs/ca.key 2048
+	openssl req -x509 -new -nodes -key certs/ca.key -subj "/CN=MyCA" -days 1024 -out $(CA_CERT)
+	# Copy CA cert for client
+	#cp $(CA_CERT) /ca.crt

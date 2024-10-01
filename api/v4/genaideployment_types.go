@@ -53,6 +53,7 @@ type SaisServiceSpec struct {
 	Tolerations               []corev1.Toleration               `json:"tolerations,omitempty"`               // Pod's tolerations for Kubernetes node's taint
 	ServiceTemplate           corev1.Service                    `json:"serviceTemplate"`                     // ServiceTemplate is a template used to create Kubernetes services
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"` // TopologySpreadConstraint https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
+	HostAliases               []corev1.HostAlias                `json:"hostAliases,omitempty"`
 }
 
 type HeadGroup struct {
