@@ -234,12 +234,12 @@ func (r *saisServiceReconcilerImpl) ReconcileConfigMap(ctx context.Context) erro
 			"TELEMETRY_REGION":    "region-iad10",
 			"ENABLE_AUTHZ":        "false",
 			"AUTH_PROVIDER":       "",
-			"SAIA_API_VERSION": 	"0.1.0",
-			"PLATFORM_VERSION": 	"0.2.20",
+			"SAIA_API_VERSION":    "0.1.0",
+			"PLATFORM_VERSION":    "0.2.20",
 			"SCS_TOKEN":           "admin-secret-key",
 			"SCPAUTH_SECRET_PATH": "/etc/sais-service-secret",
-			"SSL_CERT_FILE": "/usr/local/share/ca-certificates/ca.cert",
-			"SSL_CERT_DIR": "/usr/local/share/ca-certificates",
+			"SSL_CERT_FILE":       "/usr/local/share/ca-certificates/ca.cert",
+			"SSL_CERT_DIR":        "/usr/local/share/ca-certificates",
 		},
 	}
 

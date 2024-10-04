@@ -21,7 +21,7 @@ spec:
       jsonPath: .status.phase
       name: Phase
       type: string
-    - description: Auxillary message describing CR status
+    - description: Auxiliary message describing CR status
       jsonPath: .status.message
       name: Message
       type: string
@@ -53,7 +53,7 @@ spec:
             description: GenAIDeploymentSpec defines the desired state of GenAIDeployment
             properties:
               bucket:
-                description: VolumeSpec defines remote volume config
+                description: S3 bucket or other remote storage configuration
                 properties:
                   endpoint:
                     description: Remote volume URI
@@ -82,29 +82,40 @@ spec:
                     type: string
                 type: object
               gpuResource:
+                description: Specific GPU resource type (e.g., "nvidia.com/gpu")
+                enum:
+                - nvidia.com/gpu
+                - amd.com/gpu
                 type: string
               prometheusOperator:
+                description: Indicates if Prometheus Operator is installed
                 type: boolean
               prometheusRuleConfig:
+                description: Name of the ConfigMap containing Prometheus rules
                 type: string
               rayService:
-                description: RayServiceSpec defines the Ray service configuration
+                description: Ray service configuration with RayServiceSpec
                 properties:
                   config:
+                    description: Additional RayService configuration
                     type: string
                   enabled:
+                    description: Whether RayService is enabled
                     type: boolean
                   headGroup:
+                    description: Head group configuration
                     properties:
                       numCpus:
+                        description: Number of CPUs allocated
                         type: string
                       rayStartParams:
                         additionalProperties:
                           type: string
+                        description: Parameters for the head group
                         type: object
                       resources:
-                        description: ResourceRequirements describes the compute resource
-                          requirements.
+                        description: Resource requirements for the container (CPU,
+                          Memory)
                         properties:
                           claims:
                             description: |-
@@ -162,13 +173,18 @@ spec:
                               More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                             type: object
                         type: object
+                    required:
+                    - resources
                     type: object
                   image:
+                    description: Container image for the Ray service
                     type: string
                   workerGroup:
+                    description: Worker group configuration
                     properties:
                       affinity:
-                        description: Affinity is a group of affinity scheduling rules.
+                        description: Kubernetes Affinity rules that control how pods
+                          are assigned to particular nodes.
                         properties:
                           nodeAffinity:
                             description: Describes node affinity scheduling rules
@@ -1102,13 +1118,16 @@ spec:
                       rayStartParams:
                         additionalProperties:
                           type: string
+                        description: Parameters for the worker group
                         type: object
                       replicas:
+                        description: Number of replicas
                         format: int32
+                        minimum: 0
                         type: integer
                       resources:
-                        description: ResourceRequirements describes the compute resource
-                          requirements.
+                        description: Resource requirements for the container (CPU,
+                          Memory)
                         properties:
                           claims:
                             description: |-
@@ -1166,16 +1185,21 @@ spec:
                               More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                             type: object
                         type: object
+                    required:
+                    - resources
                     type: object
+                required:
+                - enabled
                 type: object
               requireGPU:
+                description: Indicates if GPU support is required for the workload
                 type: boolean
               saisService:
-                description: SaisServiceSpec defines the configuration for a single
-                  SaisService deployment
+                description: Configuration for SaisService
                 properties:
                   affinity:
-                    description: Affinity is a group of affinity scheduling rules.
+                    description: Kubernetes Affinity rules that control how pods are
+                      assigned to particular nodes.
                     properties:
                       nodeAffinity:
                         description: Describes node affinity scheduling rules for
@@ -2102,9 +2126,7 @@ spec:
                         type: object
                     type: object
                   configMapRef:
-                    description: |-
-                      LocalObjectReference contains enough information to let you locate the
-                      referenced object inside the same namespace.
+                    description: ConfigMap reference for environment variables
                     properties:
                       name:
                         default: ""
@@ -2118,6 +2140,7 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   hostAliases:
+                    description: HostAliases for the pods
                     items:
                       description: |-
                         HostAlias holds the mapping between IP and hostnames that will be injected as an entry in the
@@ -2137,13 +2160,15 @@ spec:
                       type: object
                     type: array
                   image:
+                    description: Container image for the service
                     type: string
                   replicas:
+                    description: Number of replicas for the service
                     format: int32
+                    minimum: 0
                     type: integer
                   resources:
-                    description: ResourceRequirements describes the compute resource
-                      requirements.
+                    description: Resource requirements for the container (CPU, Memory)
                     properties:
                       claims:
                         description: |-
@@ -2202,11 +2227,11 @@ spec:
                         type: object
                     type: object
                   schedulerName:
+                    description: Name of Scheduler to use for pod placement (defaults
+                      to “default-scheduler”)
                     type: string
                   secretRef:
-                    description: |-
-                      LocalObjectReference contains enough information to let you locate the
-                      referenced object inside the same namespace.
+                    description: Secret reference for sensitive data
                     properties:
                       name:
                         default: ""
@@ -2220,10 +2245,8 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   serviceTemplate:
-                    description: |-
-                      Service is a named abstraction of software service (for example, mysql) consisting of local port
-                      (for example 3306) that the proxy listens on, and the selector that determines which pods
-                      will answer requests sent through the proxy.
+                    description: ServiceTemplate is a template used to create Kubernetes
+                      services
                     properties:
                       apiVersion:
                         description: |-
@@ -2735,6 +2758,7 @@ spec:
                         type: object
                     type: object
                   tolerations:
+                    description: Pod's tolerations for Kubernetes node's taint
                     items:
                       description: |-
                         The pod this Toleration is attached to tolerates any taint that matches
@@ -2773,6 +2797,7 @@ spec:
                       type: object
                     type: array
                   topologySpreadConstraints:
+                    description: TopologySpreadConstraint https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
                     items:
                       description: TopologySpreadConstraint specifies how to spread
                         matching pods among the given topology.
@@ -2948,8 +2973,7 @@ spec:
                       type: object
                     type: array
                   volume:
-                    description: Volume represents a named volume in a pod that may
-                      be accessed by any container in the pod.
+                    description: Volume specifications using corev1.Volume
                     properties:
                       awsElasticBlockStore:
                         description: |-
@@ -4707,14 +4731,23 @@ spec:
                     required:
                     - name
                     type: object
+                required:
+                - affinity
+                - image
+                - replicas
+                - resources
+                - schedulerName
+                - serviceTemplate
                 type: object
               serviceAccount:
+                description: Service Account for IRSA authentication
                 type: string
               vectordbService:
-                description: VectorDbSpec defines the VectorDB service configuration
+                description: VectorDB service configuration
                 properties:
                   affinity:
-                    description: Affinity is a group of affinity scheduling rules.
+                    description: Kubernetes Affinity rules that control how pods are
+                      assigned to particular nodes.
                     properties:
                       nodeAffinity:
                         description: Describes node affinity scheduling rules for
@@ -5641,17 +5674,21 @@ spec:
                         type: object
                     type: object
                   config:
+                    description: Additional VectorDB configuration
                     type: string
                   enabled:
+                    description: Whether VectorDBService is enabled
                     type: boolean
                   image:
+                    description: Container image for the service
                     type: string
                   replicas:
+                    description: Number of replicas for the service
                     format: int32
+                    minimum: 0
                     type: integer
                   resources:
-                    description: ResourceRequirements describes the compute resource
-                      requirements.
+                    description: Resource requirements for the container (CPU, Memory)
                     properties:
                       claims:
                         description: |-
@@ -5710,9 +5747,7 @@ spec:
                         type: object
                     type: object
                   secretRef:
-                    description: |-
-                      LocalObjectReference contains enough information to let you locate the
-                      referenced object inside the same namespace.
+                    description: Reference to a user-provided secret
                     properties:
                       name:
                         default: ""
@@ -5726,10 +5761,8 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   serviceTemplate:
-                    description: |-
-                      Service is a named abstraction of software service (for example, mysql) consisting of local port
-                      (for example 3306) that the proxy listens on, and the selector that determines which pods
-                      will answer requests sent through the proxy.
+                    description: ServiceTemplate is a template used to create Kubernetes
+                      services
                     properties:
                       apiVersion:
                         description: |-
@@ -6241,7 +6274,8 @@ spec:
                         type: object
                     type: object
                   storage:
-                    description: StorageClassSpec defines storage class configuration
+                    description: Storage configuration for persistent or ephemeral
+                      storage
                     properties:
                       ephemeralStorage:
                         description: |-
@@ -6258,6 +6292,7 @@ spec:
                         type: string
                     type: object
                   tolerations:
+                    description: Pod's tolerations for Kubernetes node's taint
                     items:
                       description: |-
                         The pod this Toleration is attached to tolerates any taint that matches
@@ -6296,6 +6331,7 @@ spec:
                       type: object
                     type: array
                   topologySpreadConstraints:
+                    description: TopologySpreadConstraint https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
                     items:
                       description: TopologySpreadConstraint specifies how to spread
                         matching pods among the given topology.
@@ -6470,7 +6506,22 @@ spec:
                       - whenUnsatisfiable
                       type: object
                     type: array
+                required:
+                - affinity
+                - enabled
+                - image
+                - replicas
+                - resources
+                - secretRef
+                - serviceTemplate
+                - storage
                 type: object
+            required:
+            - bucket
+            - prometheusOperator
+            - requireGPU
+            - saisService
+            - serviceAccount
             type: object
           status:
             description: GenAIDeploymentStatus defines the observed state of GenAIDeployment
