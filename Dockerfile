@@ -39,6 +39,8 @@ ENV OPERATOR=/manager \
 
 # Install necessary packages and configure user
 RUN if grep -q 'Ubuntu' /etc/os-release; then \
+        (sed -i 's/oracular/noble/g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true) && \
+        (sed -i 's/oracular/noble/g' /etc/apt/sources.list 2>/dev/null || true) && \
         apt-get update && \
         apt-get install -y --no-install-recommends passwd && \
         apt-get install -y --no-install-recommends krb5-locales && \
