@@ -124,8 +124,9 @@ func InitMinioClientSession(ctx context.Context, appS3Endpoint string, accessKey
 	}
 
 	options := &minio.Options{
-		Secure:    useSSL,
-		Transport: &transport,
+		Secure:       useSSL,
+		Transport:    &transport,
+		BucketLookup: minio.BucketLookupPath,
 	}
 	if accessKeyID != "" && secretAccessKey != "" {
 		options.Creds = credentials.NewStaticV4(accessKeyID, secretAccessKey, "")

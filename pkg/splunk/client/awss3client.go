@@ -136,6 +136,7 @@ func InitAWSClientConfig(ctx context.Context, regionWithEndpoint, accessKeyID, s
 	}
 	s3Client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
 	})
 
 	// Validate transport
