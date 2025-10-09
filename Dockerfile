@@ -46,7 +46,6 @@ RUN if grep -q 'Ubuntu' /etc/os-release; then \
         useradd -ms /bin/bash nonroot -u 1001 && \
         apt-get install -y --no-install-recommends ca-certificates && \
         update-ca-certificates && \
-        unattended-upgrades -v && \
         apt-get clean && rm -rf /var/lib/apt/lists/*; \
     elif grep -q 'Amazon Linux' /etc/os-release; then \
         yum -y install shadow-utils && \
