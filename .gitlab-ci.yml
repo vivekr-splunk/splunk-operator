@@ -9,20 +9,21 @@ workflow:
 
 unit-tests:
   stage: validate
-  image: golang:1.23
+  image: golang:1.25.7
   variables:
     GIT_DEPTH: "0"
   before_script:
     - apt-get update
-    - apt-get install -y --no-install-recommends make git
+    - apt-get install -y --no-install-recommends make git net-tools
   script:
     - make test
 
 .aws-docker:
-  image: docker:27.5.1-cli
+  image: public.ecr.aws/docker/library/docker:27.5.1-cli
   services:
-    - name: docker:27.5.1-dind
-      command: ["--tls=false"]
+    - name: public.ecr.aws/docker/library/docker:27.5.1-dind
+      alias: docker
+      command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--tls=false"]
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
@@ -40,6 +41,17 @@ unit-tests:
         curl -L -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
         chmod +x /usr/local/bin/kubectl
       fi
+    - |
+      for i in $(seq 1 30); do
+        if docker info >/dev/null 2>&1; then
+          break
+        fi
+        if [ "$i" -eq 30 ]; then
+          echo "Docker daemon did not become reachable at ${DOCKER_HOST}"
+          exit 1
+        fi
+        sleep 1
+      done
     - |
       : "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID as a masked CI variable}"
       : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY as a masked CI variable}"
@@ -50,10 +62,11 @@ unit-tests:
     - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
 .azure-docker:
-  image: docker:27.5.1-cli
+  image: public.ecr.aws/docker/library/docker:27.5.1-cli
   services:
-    - name: docker:27.5.1-dind
-      command: ["--tls=false"]
+    - name: public.ecr.aws/docker/library/docker:27.5.1-dind
+      alias: docker
+      command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--tls=false"]
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
@@ -72,16 +85,38 @@ unit-tests:
         chmod +x /usr/local/bin/kubectl
       fi
     - |
-      : "${AZURE_ACR_LOGIN_SERVER:?Set AZURE_ACR_LOGIN_SERVER as protected CI variable}"
-      : "${AZURE_ACR_USERNAME:?Set AZURE_ACR_USERNAME as protected CI variable}"
-      : "${AZURE_ACR_PASSWORD:?Set AZURE_ACR_PASSWORD as protected CI variable}"
+      for i in $(seq 1 30); do
+        if docker info >/dev/null 2>&1; then
+          break
+        fi
+        if [ "$i" -eq 30 ]; then
+          echo "Docker daemon did not become reachable at ${DOCKER_HOST}"
+          exit 1
+        fi
+        sleep 1
+      done
+    - |
       : "${OPERATOR_IMAGE_NAME:=splunk-operator}"
-    - echo "$AZURE_ACR_PASSWORD" | docker login "$AZURE_ACR_LOGIN_SERVER" --username "$AZURE_ACR_USERNAME" --password-stdin
+      if [ -n "${AZURE_ACR_LOGIN_SERVER:-}" ] && [ -n "${AZURE_ACR_USERNAME:-}" ] && [ -n "${AZURE_ACR_PASSWORD:-}" ]; then
+        export TARGET_REGISTRY="${AZURE_ACR_LOGIN_SERVER}"
+        echo "$AZURE_ACR_PASSWORD" | docker login "$AZURE_ACR_LOGIN_SERVER" --username "$AZURE_ACR_USERNAME" --password-stdin
+      else
+        : "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID when Azure ACR creds are not provided}"
+        : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY when Azure ACR creds are not provided}"
+        : "${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION when Azure ACR creds are not provided}"
+        : "${ECR_REGISTRY:?Set ECR_REGISTRY when Azure ACR creds are not provided}"
+        export TARGET_REGISTRY="${ECR_REGISTRY}"
+        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+      fi
 
 build-operator-image:
   stage: build
   extends: .aws-docker
   rules:
+    - if: '$UPSTREAM_TRIGGERED == "true" && $TEST_TARGET == "aws" && $AWS_ACCESS_KEY_ID && $AWS_SECRET_ACCESS_KEY && $AWS_DEFAULT_REGION && $ECR_REGISTRY'
+      when: on_success
+    - if: '$UPSTREAM_TRIGGERED == "true" && $TEST_TARGET == "azure"'
+      when: never
     - if: '$CI_COMMIT_REF_PROTECTED == "true" && $AWS_ACCESS_KEY_ID && $AWS_SECRET_ACCESS_KEY && $AWS_DEFAULT_REGION && $ECR_REGISTRY'
       when: on_success
     - when: never
@@ -104,18 +139,22 @@ build-operator-image-azure:
   stage: build
   extends: .azure-docker
   rules:
-    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $AZURE_ACR_LOGIN_SERVER && $AZURE_ACR_USERNAME && $AZURE_ACR_PASSWORD'
+    - if: '$UPSTREAM_TRIGGERED == "true" && $TEST_TARGET == "azure" && (($AZURE_ACR_LOGIN_SERVER && $AZURE_ACR_USERNAME && $AZURE_ACR_PASSWORD) || ($AWS_ACCESS_KEY_ID && $AWS_SECRET_ACCESS_KEY && $AWS_DEFAULT_REGION && $ECR_REGISTRY))'
+      when: on_success
+    - if: '$UPSTREAM_TRIGGERED == "true" && $TEST_TARGET == "aws"'
+      when: never
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && (($AZURE_ACR_LOGIN_SERVER && $AZURE_ACR_USERNAME && $AZURE_ACR_PASSWORD) || ($AWS_ACCESS_KEY_ID && $AWS_SECRET_ACCESS_KEY && $AWS_DEFAULT_REGION && $ECR_REGISTRY))'
       when: on_success
     - when: never
   script:
     - export IMAGE_TAG="${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
-    - export IMAGE_REF="${AZURE_ACR_LOGIN_SERVER}/${OPERATOR_IMAGE_NAME}:${IMAGE_TAG}"
+    - export IMAGE_REF="${TARGET_REGISTRY}/${OPERATOR_IMAGE_NAME}:${IMAGE_TAG}"
     - docker build -t "$IMAGE_REF" .
     - docker push "$IMAGE_REF"
     - |
       if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
-        docker tag "$IMAGE_REF" "${AZURE_ACR_LOGIN_SERVER}/${OPERATOR_IMAGE_NAME}:latest"
-        docker push "${AZURE_ACR_LOGIN_SERVER}/${OPERATOR_IMAGE_NAME}:latest"
+        docker tag "$IMAGE_REF" "${TARGET_REGISTRY}/${OPERATOR_IMAGE_NAME}:latest"
+        docker push "${TARGET_REGISTRY}/${OPERATOR_IMAGE_NAME}:latest"
       fi
     - echo "SPLUNK_OPERATOR_IMAGE_AZURE=${IMAGE_REF}" > build-azure.env
   artifacts:
@@ -127,7 +166,9 @@ int-test-eks:
   extends: .aws-docker
   allow_failure: true
   rules:
-    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $AWS_ACCESS_KEY_ID && $AWS_SECRET_ACCESS_KEY && $AWS_DEFAULT_REGION && $ECR_REGISTRY && $EKS_CLUSTER_NAME && $SPLUNK_ENTERPRISE_IMAGE && $RELATED_IMAGE_SPLUNK_INIT && $RELATED_IMAGE_SPLUNK_SIDECAR'
+    - if: '$UPSTREAM_TRIGGERED == "true" && $TEST_TARGET == "aws" && $EKS_CLUSTER_NAME && ($SPLUNK_ENTERPRISE_IMAGE || $SPLUNK_ENTERPRISE_IMAGE_AWS) && (($RELATED_IMAGE_SPLUNK_INIT && $RELATED_IMAGE_SPLUNK_SIDECAR) || ($RELATED_IMAGE_SPLUNK_INIT_AWS && $RELATED_IMAGE_SPLUNK_SIDECAR_AWS))'
+      when: on_success
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $AWS_ACCESS_KEY_ID && $AWS_SECRET_ACCESS_KEY && $AWS_DEFAULT_REGION && $ECR_REGISTRY && $EKS_CLUSTER_NAME && ($SPLUNK_ENTERPRISE_IMAGE || $SPLUNK_ENTERPRISE_IMAGE_AWS) && (($RELATED_IMAGE_SPLUNK_INIT && $RELATED_IMAGE_SPLUNK_SIDECAR) || ($RELATED_IMAGE_SPLUNK_INIT_AWS && $RELATED_IMAGE_SPLUNK_SIDECAR_AWS))'
       when: manual
     - when: never
   needs:
@@ -136,7 +177,15 @@ int-test-eks:
   script:
     - |
       : "${EKS_CLUSTER_NAME:?Set EKS_CLUSTER_NAME to run integration tests against EKS}"
-      : "${SPLUNK_ENTERPRISE_IMAGE:?Set SPLUNK_ENTERPRISE_IMAGE (for example splunk/splunk:10.4.0)}"
+      SPLUNK_ENTERPRISE_IMAGE_VALUE="${SPLUNK_ENTERPRISE_IMAGE_AWS:-${SPLUNK_ENTERPRISE_IMAGE:-}}"
+      RELATED_IMAGE_SPLUNK_INIT_VALUE="${RELATED_IMAGE_SPLUNK_INIT_AWS:-${RELATED_IMAGE_SPLUNK_INIT:-}}"
+      RELATED_IMAGE_SPLUNK_SIDECAR_VALUE="${RELATED_IMAGE_SPLUNK_SIDECAR_AWS:-${RELATED_IMAGE_SPLUNK_SIDECAR:-}}"
+      : "${SPLUNK_ENTERPRISE_IMAGE_VALUE:?Set SPLUNK_ENTERPRISE_IMAGE_AWS (or SPLUNK_ENTERPRISE_IMAGE) for EKS tests}"
+      : "${RELATED_IMAGE_SPLUNK_INIT_VALUE:?Set RELATED_IMAGE_SPLUNK_INIT_AWS (or RELATED_IMAGE_SPLUNK_INIT) for EKS tests}"
+      : "${RELATED_IMAGE_SPLUNK_SIDECAR_VALUE:?Set RELATED_IMAGE_SPLUNK_SIDECAR_AWS (or RELATED_IMAGE_SPLUNK_SIDECAR) for EKS tests}"
+      export SPLUNK_ENTERPRISE_IMAGE="${SPLUNK_ENTERPRISE_IMAGE_VALUE}"
+      export RELATED_IMAGE_SPLUNK_INIT="${RELATED_IMAGE_SPLUNK_INIT_VALUE}"
+      export RELATED_IMAGE_SPLUNK_SIDECAR="${RELATED_IMAGE_SPLUNK_SIDECAR_VALUE}"
     - aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
     - export CLUSTER_PROVIDER=eks
     - export TEST_CLUSTER_PLATFORM=eks
@@ -144,8 +193,6 @@ int-test-eks:
     - export ECR_REGISTRY="$ECR_REGISTRY"
     - export SPLUNK_OPERATOR_IMAGE="${SPLUNK_OPERATOR_IMAGE}"
     - export SPLUNK_POD_ARCH="${SPLUNK_POD_ARCH:-multi-container}"
-    - export RELATED_IMAGE_SPLUNK_INIT="${RELATED_IMAGE_SPLUNK_INIT}"
-    - export RELATED_IMAGE_SPLUNK_SIDECAR="${RELATED_IMAGE_SPLUNK_SIDECAR}"
     - export TEST_FOCUS="${TEST_FOCUS:-smoke}"
     - make int-test
 
@@ -154,7 +201,9 @@ int-test-aks:
   extends: .azure-docker
   allow_failure: true
   rules:
-    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $AZURE_ACR_LOGIN_SERVER && $AZURE_ACR_USERNAME && $AZURE_ACR_PASSWORD && $AKS_KUBECONFIG_B64 && $SPLUNK_ENTERPRISE_IMAGE && $RELATED_IMAGE_SPLUNK_INIT && $RELATED_IMAGE_SPLUNK_SIDECAR && $STORAGE_ACCOUNT && $STORAGE_ACCOUNT_KEY && $TEST_CONTAINER && $INDEXES_CONTAINER'
+    - if: '$UPSTREAM_TRIGGERED == "true" && $TEST_TARGET == "azure" && $AKS_KUBECONFIG_B64 && ($SPLUNK_ENTERPRISE_IMAGE || $SPLUNK_ENTERPRISE_IMAGE_AZURE) && (($RELATED_IMAGE_SPLUNK_INIT && $RELATED_IMAGE_SPLUNK_SIDECAR) || ($RELATED_IMAGE_SPLUNK_INIT_AZURE && $RELATED_IMAGE_SPLUNK_SIDECAR_AZURE)) && $STORAGE_ACCOUNT && $STORAGE_ACCOUNT_KEY && $TEST_CONTAINER && $INDEXES_CONTAINER'
+      when: on_success
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && (($AZURE_ACR_LOGIN_SERVER && $AZURE_ACR_USERNAME && $AZURE_ACR_PASSWORD) || ($AWS_ACCESS_KEY_ID && $AWS_SECRET_ACCESS_KEY && $AWS_DEFAULT_REGION && $ECR_REGISTRY)) && $AKS_KUBECONFIG_B64 && ($SPLUNK_ENTERPRISE_IMAGE || $SPLUNK_ENTERPRISE_IMAGE_AZURE) && (($RELATED_IMAGE_SPLUNK_INIT && $RELATED_IMAGE_SPLUNK_SIDECAR) || ($RELATED_IMAGE_SPLUNK_INIT_AZURE && $RELATED_IMAGE_SPLUNK_SIDECAR_AZURE)) && $STORAGE_ACCOUNT && $STORAGE_ACCOUNT_KEY && $TEST_CONTAINER && $INDEXES_CONTAINER'
       when: manual
     - when: never
   needs:
@@ -164,14 +213,30 @@ int-test-aks:
     - mkdir -p ~/.kube
     - echo "$AKS_KUBECONFIG_B64" | base64 -d > ~/.kube/config
     - if [ -n "${AKS_KUBE_CONTEXT:-}" ]; then kubectl config use-context "${AKS_KUBE_CONTEXT}"; fi
+    - |
+      case "${STORAGE_ACCOUNT_KEY}" in
+        '$('*|'${'*)
+          echo "STORAGE_ACCOUNT_KEY appears to be a shell placeholder. Set the raw key value in project/group CI variables."
+          exit 1
+          ;;
+      esac
+    - |
+      SPLUNK_ENTERPRISE_IMAGE_VALUE="${SPLUNK_ENTERPRISE_IMAGE_AZURE:-${SPLUNK_ENTERPRISE_IMAGE:-}}"
+      RELATED_IMAGE_SPLUNK_INIT_VALUE="${RELATED_IMAGE_SPLUNK_INIT_AZURE:-${RELATED_IMAGE_SPLUNK_INIT:-}}"
+      RELATED_IMAGE_SPLUNK_SIDECAR_VALUE="${RELATED_IMAGE_SPLUNK_SIDECAR_AZURE:-${RELATED_IMAGE_SPLUNK_SIDECAR:-}}"
+      : "${SPLUNK_ENTERPRISE_IMAGE_VALUE:?Set SPLUNK_ENTERPRISE_IMAGE_AZURE (or SPLUNK_ENTERPRISE_IMAGE) for AKS tests}"
+      : "${RELATED_IMAGE_SPLUNK_INIT_VALUE:?Set RELATED_IMAGE_SPLUNK_INIT_AZURE (or RELATED_IMAGE_SPLUNK_INIT) for AKS tests}"
+      : "${RELATED_IMAGE_SPLUNK_SIDECAR_VALUE:?Set RELATED_IMAGE_SPLUNK_SIDECAR_AZURE (or RELATED_IMAGE_SPLUNK_SIDECAR) for AKS tests}"
+      export SPLUNK_ENTERPRISE_IMAGE="${SPLUNK_ENTERPRISE_IMAGE_VALUE}"
+      export RELATED_IMAGE_SPLUNK_INIT="${RELATED_IMAGE_SPLUNK_INIT_VALUE}"
+      export RELATED_IMAGE_SPLUNK_SIDECAR="${RELATED_IMAGE_SPLUNK_SIDECAR_VALUE}"
     - export CLUSTER_PROVIDER=azure
     - export TEST_CLUSTER_PLATFORM=azure
-    - export PRIVATE_REGISTRY="$AZURE_ACR_LOGIN_SERVER"
-    - export ECR_REGISTRY="$AZURE_ACR_LOGIN_SERVER"
+    - export PRIVATE_REGISTRY="$TARGET_REGISTRY"
+    - export ECR_REGISTRY="$TARGET_REGISTRY"
+    - export AZURE_CONTAINER_REGISTRY_LOGIN_SERVER="$TARGET_REGISTRY"
     - export SPLUNK_OPERATOR_IMAGE="${SPLUNK_OPERATOR_IMAGE_AZURE}"
     - export SPLUNK_POD_ARCH="${SPLUNK_POD_ARCH:-multi-container}"
-    - export RELATED_IMAGE_SPLUNK_INIT="${RELATED_IMAGE_SPLUNK_INIT}"
-    - export RELATED_IMAGE_SPLUNK_SIDECAR="${RELATED_IMAGE_SPLUNK_SIDECAR}"
     - export TEST_CONTAINER="${TEST_CONTAINER}"
     - export INDEXES_CONTAINER="${INDEXES_CONTAINER}"
     - export STORAGE_ACCOUNT="${STORAGE_ACCOUNT}"
