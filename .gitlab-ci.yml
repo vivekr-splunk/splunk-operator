@@ -1,0 +1,184 @@
+stages:
+  - validate
+  - build
+  - e2e
+
+workflow:
+  rules:
+    - when: always
+
+unit-tests:
+  stage: validate
+  image: golang:1.23
+  variables:
+    GIT_DEPTH: "0"
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends make git
+  script:
+    - make test
+
+.aws-docker:
+  image: docker:27.5.1-cli
+  services:
+    - name: docker:27.5.1-dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - apk add --no-cache bash curl jq make git aws-cli
+    - |
+      if [ "${CI_DEBUG_TRACE:-false}" = "true" ]; then
+        echo "CI_DEBUG_TRACE=true is blocked to prevent secret exposure"
+        exit 1
+      fi
+    - |
+      if ! command -v kubectl >/dev/null 2>&1; then
+        KUBECTL_VERSION="$(curl -L -s https://dl.k8s.io/release/stable.txt)"
+        curl -L -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+        chmod +x /usr/local/bin/kubectl
+      fi
+    - |
+      : "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID as a masked CI variable}"
+      : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY as a masked CI variable}"
+      : "${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION in CI variables}"
+      : "${ECR_REGISTRY:?Set ECR_REGISTRY in CI variables}"
+      : "${OPERATOR_IMAGE_NAME:=splunk-operator}"
+    - aws sts get-caller-identity >/dev/null
+    - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+.azure-docker:
+  image: docker:27.5.1-cli
+  services:
+    - name: docker:27.5.1-dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - apk add --no-cache bash curl jq make git aws-cli
+    - |
+      if [ "${CI_DEBUG_TRACE:-false}" = "true" ]; then
+        echo "CI_DEBUG_TRACE=true is blocked to prevent secret exposure"
+        exit 1
+      fi
+    - |
+      if ! command -v kubectl >/dev/null 2>&1; then
+        KUBECTL_VERSION="$(curl -L -s https://dl.k8s.io/release/stable.txt)"
+        curl -L -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+        chmod +x /usr/local/bin/kubectl
+      fi
+    - |
+      : "${AZURE_ACR_LOGIN_SERVER:?Set AZURE_ACR_LOGIN_SERVER as protected CI variable}"
+      : "${AZURE_ACR_USERNAME:?Set AZURE_ACR_USERNAME as protected CI variable}"
+      : "${AZURE_ACR_PASSWORD:?Set AZURE_ACR_PASSWORD as protected CI variable}"
+      : "${OPERATOR_IMAGE_NAME:=splunk-operator}"
+    - echo "$AZURE_ACR_PASSWORD" | docker login "$AZURE_ACR_LOGIN_SERVER" --username "$AZURE_ACR_USERNAME" --password-stdin
+
+build-operator-image:
+  stage: build
+  extends: .aws-docker
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $AWS_ACCESS_KEY_ID && $AWS_SECRET_ACCESS_KEY && $AWS_DEFAULT_REGION && $ECR_REGISTRY'
+      when: on_success
+    - when: never
+  script:
+    - export IMAGE_TAG="${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
+    - export IMAGE_REF="${ECR_REGISTRY}/${OPERATOR_IMAGE_NAME}:${IMAGE_TAG}"
+    - docker build -t "$IMAGE_REF" .
+    - docker push "$IMAGE_REF"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$IMAGE_REF" "${ECR_REGISTRY}/${OPERATOR_IMAGE_NAME}:latest"
+        docker push "${ECR_REGISTRY}/${OPERATOR_IMAGE_NAME}:latest"
+      fi
+    - echo "SPLUNK_OPERATOR_IMAGE=${IMAGE_REF}" > build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+
+build-operator-image-azure:
+  stage: build
+  extends: .azure-docker
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $AZURE_ACR_LOGIN_SERVER && $AZURE_ACR_USERNAME && $AZURE_ACR_PASSWORD'
+      when: on_success
+    - when: never
+  script:
+    - export IMAGE_TAG="${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
+    - export IMAGE_REF="${AZURE_ACR_LOGIN_SERVER}/${OPERATOR_IMAGE_NAME}:${IMAGE_TAG}"
+    - docker build -t "$IMAGE_REF" .
+    - docker push "$IMAGE_REF"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$IMAGE_REF" "${AZURE_ACR_LOGIN_SERVER}/${OPERATOR_IMAGE_NAME}:latest"
+        docker push "${AZURE_ACR_LOGIN_SERVER}/${OPERATOR_IMAGE_NAME}:latest"
+      fi
+    - echo "SPLUNK_OPERATOR_IMAGE_AZURE=${IMAGE_REF}" > build-azure.env
+  artifacts:
+    reports:
+      dotenv: build-azure.env
+
+int-test-eks:
+  stage: e2e
+  extends: .aws-docker
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $AWS_ACCESS_KEY_ID && $AWS_SECRET_ACCESS_KEY && $AWS_DEFAULT_REGION && $ECR_REGISTRY && $EKS_CLUSTER_NAME && $SPLUNK_ENTERPRISE_IMAGE && $RELATED_IMAGE_SPLUNK_INIT && $RELATED_IMAGE_SPLUNK_SIDECAR'
+      when: manual
+    - when: never
+  needs:
+    - job: build-operator-image
+      artifacts: true
+  script:
+    - |
+      : "${EKS_CLUSTER_NAME:?Set EKS_CLUSTER_NAME to run integration tests against EKS}"
+      : "${SPLUNK_ENTERPRISE_IMAGE:?Set SPLUNK_ENTERPRISE_IMAGE (for example splunk/splunk:10.4.0)}"
+    - aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
+    - export CLUSTER_PROVIDER=eks
+    - export TEST_CLUSTER_PLATFORM=eks
+    - export PRIVATE_REGISTRY="$ECR_REGISTRY"
+    - export ECR_REGISTRY="$ECR_REGISTRY"
+    - export SPLUNK_OPERATOR_IMAGE="${SPLUNK_OPERATOR_IMAGE}"
+    - export SPLUNK_POD_ARCH="${SPLUNK_POD_ARCH:-multi-container}"
+    - export RELATED_IMAGE_SPLUNK_INIT="${RELATED_IMAGE_SPLUNK_INIT}"
+    - export RELATED_IMAGE_SPLUNK_SIDECAR="${RELATED_IMAGE_SPLUNK_SIDECAR}"
+    - export TEST_FOCUS="${TEST_FOCUS:-smoke}"
+    - make int-test
+
+int-test-aks:
+  stage: e2e
+  extends: .azure-docker
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $AZURE_ACR_LOGIN_SERVER && $AZURE_ACR_USERNAME && $AZURE_ACR_PASSWORD && $AKS_KUBECONFIG_B64 && $SPLUNK_ENTERPRISE_IMAGE && $RELATED_IMAGE_SPLUNK_INIT && $RELATED_IMAGE_SPLUNK_SIDECAR && $STORAGE_ACCOUNT && $STORAGE_ACCOUNT_KEY && $TEST_CONTAINER && $INDEXES_CONTAINER'
+      when: manual
+    - when: never
+  needs:
+    - job: build-operator-image-azure
+      artifacts: true
+  script:
+    - mkdir -p ~/.kube
+    - echo "$AKS_KUBECONFIG_B64" | base64 -d > ~/.kube/config
+    - if [ -n "${AKS_KUBE_CONTEXT:-}" ]; then kubectl config use-context "${AKS_KUBE_CONTEXT}"; fi
+    - export CLUSTER_PROVIDER=azure
+    - export TEST_CLUSTER_PLATFORM=azure
+    - export PRIVATE_REGISTRY="$AZURE_ACR_LOGIN_SERVER"
+    - export ECR_REGISTRY="$AZURE_ACR_LOGIN_SERVER"
+    - export SPLUNK_OPERATOR_IMAGE="${SPLUNK_OPERATOR_IMAGE_AZURE}"
+    - export SPLUNK_POD_ARCH="${SPLUNK_POD_ARCH:-multi-container}"
+    - export RELATED_IMAGE_SPLUNK_INIT="${RELATED_IMAGE_SPLUNK_INIT}"
+    - export RELATED_IMAGE_SPLUNK_SIDECAR="${RELATED_IMAGE_SPLUNK_SIDECAR}"
+    - export TEST_CONTAINER="${TEST_CONTAINER}"
+    - export INDEXES_CONTAINER="${INDEXES_CONTAINER}"
+    - export STORAGE_ACCOUNT="${STORAGE_ACCOUNT}"
+    - export STORAGE_ACCOUNT_KEY="${STORAGE_ACCOUNT_KEY}"
+    - export AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT:-$STORAGE_ACCOUNT}"
+    - export AZURE_STORAGE_ACCOUNT_KEY="${AZURE_STORAGE_ACCOUNT_KEY:-$STORAGE_ACCOUNT_KEY}"
+    - export AZURE_TEST_CONTAINER="${AZURE_TEST_CONTAINER:-$TEST_CONTAINER}"
+    - export AZURE_INDEXES_CONTAINER="${AZURE_INDEXES_CONTAINER:-$INDEXES_CONTAINER}"
+    - export TEST_FOCUS="${TEST_FOCUS:-smoke.*azure|azure.*smoke}"
+    - make int-test
