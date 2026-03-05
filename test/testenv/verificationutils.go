@@ -21,13 +21,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
 	"os/exec"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"strconv"
 	"strings"
 	"time"
 
 	gomega "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	enterpriseApiV3 "github.com/splunk/splunk-operator/api/v3"
 	enterpriseApi "github.com/splunk/splunk-operator/api/v4"
@@ -36,6 +39,19 @@ import (
 )
 
 var StabilizationDuration = time.Second * 20
+
+const defaultCriticalReadinessTimeout = 45 * time.Minute
+
+var terminalContainerWaitingReasons = map[string]struct{}{
+	"CrashLoopBackOff":           {},
+	"ErrImagePull":               {},
+	"ImagePullBackOff":           {},
+	"RunContainerError":          {},
+	"CreateContainerError":       {},
+	"CreateContainerConfigError": {},
+	"InvalidImageName":           {},
+	"ContainerCannotRun":         {},
+}
 
 // PodDetailsStruct captures output of kubectl get pods podname -o json
 type PodDetailsStruct struct {
@@ -72,6 +88,85 @@ type PodDetailsStruct struct {
 	} `json:"status"`
 }
 
+func effectiveCriticalReadinessTimeout(deployment *Deployment, testenvInstance *TestCaseEnv) time.Duration {
+	configuredTimeout := deployment.GetTimeout()
+	effectiveTimeout := configuredTimeout
+
+	if configuredTimeout <= 0 || configuredTimeout > defaultCriticalReadinessTimeout {
+		effectiveTimeout = defaultCriticalReadinessTimeout
+	}
+
+	if envValue := strings.TrimSpace(os.Getenv("SPLUNK_OPERATOR_READY_CHECK_TIMEOUT_SECONDS")); envValue != "" {
+		parsedSeconds, err := strconv.Atoi(envValue)
+		if err != nil || parsedSeconds <= 0 {
+			testenvInstance.Log.Info("Ignoring invalid SPLUNK_OPERATOR_READY_CHECK_TIMEOUT_SECONDS", "value", envValue, "error", err)
+		} else {
+			envTimeout := time.Duration(parsedSeconds) * time.Second
+			if envTimeout < effectiveTimeout {
+				effectiveTimeout = envTimeout
+			}
+		}
+	}
+
+	if effectiveTimeout != configuredTimeout {
+		testenvInstance.Log.Info("Using bounded timeout for critical readiness checks", "configured", configuredTimeout, "effective", effectiveTimeout)
+	}
+	return effectiveTimeout
+}
+
+func hasTerminalContainerWaitingReason(reason string) bool {
+	_, ok := terminalContainerWaitingReasons[reason]
+	return ok
+}
+
+func terminalContainerStatusError(podName string, status corev1.ContainerStatus, containerType string) error {
+	if status.State.Waiting != nil && hasTerminalContainerWaitingReason(status.State.Waiting.Reason) {
+		return fmt.Errorf("pod %s %s %s waiting reason=%s message=%s", podName, containerType, status.Name, status.State.Waiting.Reason, strings.TrimSpace(status.State.Waiting.Message))
+	}
+
+	if status.State.Terminated != nil && status.State.Terminated.ExitCode != 0 {
+		term := status.State.Terminated
+		return fmt.Errorf("pod %s %s %s terminated exitCode=%d reason=%s message=%s", podName, containerType, status.Name, term.ExitCode, term.Reason, strings.TrimSpace(term.Message))
+	}
+
+	return nil
+}
+
+func failFastOnTerminalPodStates(ctx context.Context, deployment *Deployment, testenvInstance *TestCaseEnv) error {
+	podList := &corev1.PodList{}
+	if err := testenvInstance.GetKubeClient().List(ctx, podList, client.InNamespace(testenvInstance.GetName())); err != nil {
+		testenvInstance.Log.Error(err, "Unable to list pods while waiting for critical readiness checks")
+		return nil
+	}
+
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if !strings.HasPrefix(pod.Name, "splunk-") || strings.HasPrefix(pod.Name, "splunk-op") {
+			continue
+		}
+		if !strings.Contains(pod.Name, deployment.GetName()) {
+			continue
+		}
+
+		if pod.Status.Phase == corev1.PodFailed {
+			return fmt.Errorf("pod %s entered Failed phase reason=%s message=%s", pod.Name, pod.Status.Reason, strings.TrimSpace(pod.Status.Message))
+		}
+
+		for _, initStatus := range pod.Status.InitContainerStatuses {
+			if err := terminalContainerStatusError(pod.Name, initStatus, "initContainer"); err != nil {
+				return err
+			}
+		}
+		for _, status := range pod.Status.ContainerStatuses {
+			if err := terminalContainerStatusError(pod.Name, status, "container"); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 // VerifyMonitoringConsoleReady verify Monitoring Console CR is in Ready Status and does not flip-flop
 func VerifyMonitoringConsoleReady(ctx context.Context, deployment *Deployment, mcName string, monitoringConsole *enterpriseApi.MonitoringConsole, testenvInstance *TestCaseEnv) {
 	gomega.Eventually(func() enterpriseApi.Phase {
@@ -88,12 +183,21 @@ func VerifyMonitoringConsoleReady(ctx context.Context, deployment *Deployment, m
 	// Stabilization period
 	time.Sleep(StabilizationDuration)
 
-	// In a steady state, we should stay in Ready and not flip-flop around
-	gomega.Consistently(func() enterpriseApi.Phase {
-		_ = deployment.GetInstance(ctx, mcName, monitoringConsole)
-		DumpGetSplunkVersion(ctx, testenvInstance.GetName(), deployment, "monitoring-console")
-		return monitoringConsole.Status.Phase
-	}, ConsistentDuration, ConsistentPollInterval).Should(gomega.Equal(enterpriseApi.PhaseReady))
+	// In a steady state, we should stay in Ready and not flip-flop around.
+	// App framework operations can briefly transition MC phase during rollout/reconcile loops,
+	// so we require an eventually-stable Ready window instead of failing on the first transient.
+	gomega.Eventually(func() bool {
+		steadyUntil := time.Now().Add(ConsistentDuration)
+		for time.Now().Before(steadyUntil) {
+			_ = deployment.GetInstance(ctx, mcName, monitoringConsole)
+			DumpGetSplunkVersion(ctx, testenvInstance.GetName(), deployment, "monitoring-console")
+			if monitoringConsole.Status.Phase != enterpriseApi.PhaseReady {
+				return false
+			}
+			time.Sleep(ConsistentPollInterval)
+		}
+		return true
+	}, deployment.GetTimeout(), PollInterval).Should(gomega.BeTrue())
 }
 
 // StandaloneReady verify Standalone is in ReadyStatus and does not flip-flop
@@ -219,25 +323,63 @@ func IngestorReady(ctx context.Context, deployment *Deployment, testenvInstance 
 func ClusterManagerReady(ctx context.Context, deployment *Deployment, testenvInstance *TestCaseEnv) {
 	// Ensure that the cluster-manager goes to Ready phase
 	cm := &enterpriseApi.ClusterManager{}
-	gomega.Eventually(func() enterpriseApi.Phase {
-		err := deployment.GetInstance(ctx, deployment.GetName(), cm)
-		if err != nil {
-			return enterpriseApi.PhaseError
+	cmV3 := &enterpriseApiV3.ClusterMaster{}
+	gomega.Eventually(func() error {
+		if err := failFastOnTerminalPodStates(ctx, deployment, testenvInstance); err != nil {
+			return gomega.StopTrying("detected terminal pod state while waiting for cluster-manager readiness").Wrap(err)
 		}
-		testenvInstance.Log.Info("Waiting for cluster-manager phase to be ready", "instance", cm.ObjectMeta.Name, "Phase", cm.Status.Phase)
-		DumpGetPods(testenvInstance.GetName())
 
-		// Test ClusterManager Phase to see if its ready
-		return cm.Status.Phase
-	}, deployment.GetTimeout(), PollInterval).Should(gomega.Equal(enterpriseApi.PhaseReady))
+		err := deployment.GetInstance(ctx, deployment.GetName(), cm)
+		if err == nil {
+			testenvInstance.Log.Info("Waiting for cluster-manager phase to be ready", "instance", cm.ObjectMeta.Name, "Phase", cm.Status.Phase)
+			DumpGetPods(testenvInstance.GetName())
+
+			// Test ClusterManager Phase to see if its ready
+			if cm.Status.Phase == enterpriseApi.PhaseReady {
+				return nil
+			}
+			return fmt.Errorf("cluster-manager phase=%s", cm.Status.Phase)
+		}
+
+		// Some M4 tests still deploy v3 ClusterMaster resources.
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("unable to fetch cluster-manager resource: %w", err)
+		}
+
+		err = deployment.GetInstance(ctx, deployment.GetName(), cmV3)
+		if err != nil {
+			return fmt.Errorf("unable to fetch v3 cluster-master resource: %w", err)
+		}
+
+		testenvInstance.Log.Info("Waiting for cluster-master(v3) phase to be ready", "instance", cmV3.ObjectMeta.Name, "Phase", cmV3.Status.Phase)
+		DumpGetPods(testenvInstance.GetName())
+		if cmV3.Status.Phase == enterpriseApi.PhaseReady {
+			return nil
+		}
+		return fmt.Errorf("cluster-master(v3) phase=%s", cmV3.Status.Phase)
+	}, effectiveCriticalReadinessTimeout(deployment, testenvInstance), PollInterval).Should(gomega.Succeed())
 
 	// In a steady state, cluster-manager should stay in Ready and not flip-flop around
 	gomega.Consistently(func() enterpriseApi.Phase {
-		_ = deployment.GetInstance(ctx, deployment.GetName(), cm)
-		testenvInstance.Log.Info("Check for Consistency "+splcommon.ClusterManager+" phase to be ready", "instance", cm.ObjectMeta.Name, "Phase", cm.Status.Phase)
-		DumpGetSplunkVersion(ctx, testenvInstance.GetName(), deployment, "cluster-manager")
-		testenvInstance.Log.Info("Check for Consistency cluster-manager phase to be ready", "instance", cm.ObjectMeta.Name, "Phase", cm.Status.Phase)
-		return cm.Status.Phase
+		err := deployment.GetInstance(ctx, deployment.GetName(), cm)
+		if err == nil {
+			testenvInstance.Log.Info("Check for Consistency "+splcommon.ClusterManager+" phase to be ready", "instance", cm.ObjectMeta.Name, "Phase", cm.Status.Phase)
+			DumpGetSplunkVersion(ctx, testenvInstance.GetName(), deployment, "cluster-manager")
+			testenvInstance.Log.Info("Check for Consistency cluster-manager phase to be ready", "instance", cm.ObjectMeta.Name, "Phase", cm.Status.Phase)
+			return cm.Status.Phase
+		}
+
+		if !apierrors.IsNotFound(err) {
+			return enterpriseApi.PhaseError
+		}
+
+		err = deployment.GetInstance(ctx, deployment.GetName(), cmV3)
+		if err != nil {
+			return enterpriseApi.PhaseError
+		}
+		testenvInstance.Log.Info("Check for Consistency cluster-master(v3) phase to be ready", "instance", cmV3.ObjectMeta.Name, "Phase", cmV3.Status.Phase)
+		DumpGetSplunkVersion(ctx, testenvInstance.GetName(), deployment, "cluster-master")
+		return cmV3.Status.Phase
 	}, ConsistentDuration, ConsistentPollInterval).Should(gomega.Equal(enterpriseApi.PhaseReady))
 }
 
@@ -245,17 +387,24 @@ func ClusterManagerReady(ctx context.Context, deployment *Deployment, testenvIns
 func ClusterMasterReady(ctx context.Context, deployment *Deployment, testenvInstance *TestCaseEnv) {
 	// Ensure that the cluster-master goes to Ready phase
 	cm := &enterpriseApiV3.ClusterMaster{}
-	gomega.Eventually(func() enterpriseApi.Phase {
+	gomega.Eventually(func() error {
+		if err := failFastOnTerminalPodStates(ctx, deployment, testenvInstance); err != nil {
+			return gomega.StopTrying("detected terminal pod state while waiting for cluster-master readiness").Wrap(err)
+		}
+
 		err := deployment.GetInstance(ctx, deployment.GetName(), cm)
 		if err != nil {
-			return enterpriseApi.PhaseError
+			return fmt.Errorf("unable to fetch cluster-master resource: %w", err)
 		}
 		testenvInstance.Log.Info("Waiting for cluster-master phase to be ready", "instance", cm.ObjectMeta.Name, "Phase", cm.Status.Phase)
 		DumpGetPods(testenvInstance.GetName())
 
 		// Test ClusterMaster Phase to see if its ready
-		return cm.Status.Phase
-	}, deployment.GetTimeout(), PollInterval).Should(gomega.Equal(enterpriseApi.PhaseReady))
+		if cm.Status.Phase == enterpriseApi.PhaseReady {
+			return nil
+		}
+		return fmt.Errorf("cluster-master phase=%s", cm.Status.Phase)
+	}, effectiveCriticalReadinessTimeout(deployment, testenvInstance), PollInterval).Should(gomega.Succeed())
 
 	// In a steady state, cluster-master should stay in Ready and not flip-flop around
 	gomega.Consistently(func() enterpriseApi.Phase {
