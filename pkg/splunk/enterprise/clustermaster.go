@@ -171,6 +171,12 @@ func ApplyClusterMaster(ctx context.Context, client splcommon.ControllerClient, 
 		return result, err
 	}
 
+	// create or update a headless service for the cluster manager
+	err = splctrl.ApplyService(ctx, client, getSplunkService(ctx, cr, &cr.Spec.CommonSplunkSpec, SplunkClusterMaster, true))
+	if err != nil {
+		return result, err
+	}
+
 	// create or update a regular service for the cluster manager
 	err = splctrl.ApplyService(ctx, client, getSplunkService(ctx, cr, &cr.Spec.CommonSplunkSpec, SplunkClusterMaster, false))
 	if err != nil {

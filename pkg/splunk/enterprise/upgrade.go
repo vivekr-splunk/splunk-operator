@@ -132,6 +132,12 @@ ClusterManager:
 		/// get the cluster manager image referred in custom resource
 		cmImage, err := getCurrentImage(ctx, c, clusterManager, SplunkClusterManager)
 		if err != nil {
+			// During initial bootstrap, ClusterManager CR may exist before its StatefulSet.
+			// Treat this as transient and retry, instead of forcing dependent CRs into error.
+			if k8serrors.IsNotFound(err) {
+				scopedLog.Info("ClusterManager statefulset not found yet; waiting for ClusterManager to initialize", "clusterManager", clusterManagerRef.Name)
+				return false, nil
+			}
 			eventPublisher.Warning(ctx, "UpgradePathValidation", fmt.Sprintf("Could not get the Cluster Manager Image. Reason %v", err))
 			scopedLog.Error(err, "Unable to get clusterManager current image")
 			return false, err
@@ -140,7 +146,8 @@ ClusterManager:
 		// check if an image upgrade is happening and whether CM has finished updating yet, return false to stop
 		// further reconcile operations on custom resource until CM is ready
 		if clusterManager.Status.Phase != enterpriseApi.PhaseReady {
-			return false, fmt.Errorf("cluster manager %s is not ready (phase: %s). IndexerCluster upgrade is waiting for ClusterManager to be ready", clusterManager.Name, clusterManager.Status.Phase)
+			scopedLog.Info("ClusterManager is not ready yet; waiting before dependent upgrade", "clusterManager", clusterManager.Name, "phase", clusterManager.Status.Phase)
+			return false, nil
 		}
 		if cmImage != spec.Image {
 			// Emit event when upgrade is blocked due to ClusterManager / IndexerCluster version mismatch
@@ -286,7 +293,11 @@ MonitoringConsole:
 		for _, cm := range clusterManagerList.Items {
 			if cm.Spec.MonitoringConsoleRef.Name == cr.GetName() {
 				if cm.Status.Phase != enterpriseApi.PhaseReady {
-					return false, fmt.Errorf("cluster manager %s is not ready", cm.Name)
+					scopedLog.Info("MonitoringConsole waiting for ClusterManager dependency",
+						"monitoringConsole", cr.GetName(),
+						"clusterManager", cm.Name,
+						"phase", cm.Status.Phase)
+					return false, nil
 				}
 			}
 		}
@@ -304,7 +315,11 @@ MonitoringConsole:
 		for _, shc := range searchHeadClusterList.Items {
 			if shc.Spec.MonitoringConsoleRef.Name == cr.GetName() {
 				if shc.Status.Phase != enterpriseApi.PhaseReady {
-					return false, fmt.Errorf("search head %s is not ready", shc.Name)
+					scopedLog.Info("MonitoringConsole waiting for SearchHeadCluster dependency",
+						"monitoringConsole", cr.GetName(),
+						"searchHeadCluster", shc.Name,
+						"phase", shc.Status.Phase)
+					return false, nil
 				}
 			}
 		}
@@ -322,7 +337,11 @@ MonitoringConsole:
 		for _, idx := range indexerClusterList.Items {
 			if idx.Name == cr.GetName() {
 				if idx.Status.Phase != enterpriseApi.PhaseReady {
-					return false, fmt.Errorf("indexer %s is not ready", idx.Name)
+					scopedLog.Info("MonitoringConsole waiting for IndexerCluster dependency",
+						"monitoringConsole", cr.GetName(),
+						"indexerCluster", idx.Name,
+						"phase", idx.Status.Phase)
+					return false, nil
 				}
 			}
 		}
@@ -340,7 +359,11 @@ MonitoringConsole:
 		for _, stdln := range standaloneList.Items {
 			if stdln.Name == cr.GetName() {
 				if stdln.Status.Phase != enterpriseApi.PhaseReady {
-					return false, fmt.Errorf("standalone %s is not ready", stdln.Name)
+					scopedLog.Info("MonitoringConsole waiting for Standalone dependency",
+						"monitoringConsole", cr.GetName(),
+						"standalone", stdln.Name,
+						"phase", stdln.Status.Phase)
+					return false, nil
 				}
 			}
 		}

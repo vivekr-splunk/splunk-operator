@@ -1239,17 +1239,20 @@ func updateSplunkPodTemplateWithConfig(ctx context.Context, client splcommon.Con
 
 		// Inject init container (if image provided).
 		if img := strings.TrimSpace(GetSplunkInitImage()); img != "" {
+			// Reuse Splunk env so init can normalize role/cluster URL inputs.
+			initEnv := append([]corev1.EnvVar{}, env...)
+			// Keep init-specific config source entry.
+			initEnv = append(initEnv, corev1.EnvVar{Name: "SPLUNK_CONFIG_SOURCES", Value: splunkDefaults})
+			if len(initEnv) > 0 {
+				initEnv = removeDuplicateEnvVars(initEnv)
+			}
+
 			ic := corev1.Container{
 				Name:            "splunk-init",
 				Image:           img,
 				ImagePullPolicy: corev1.PullPolicy(spec.ImagePullPolicy),
-				Env: []corev1.EnvVar{
-					{Name: "SPLUNK_HOME", Value: "/opt/splunk"},
-					{Name: "SPLUNK_ROLE", Value: role},
-					// Reuse the same "defaults URL" logic to seed the init pipeline.
-					{Name: "SPLUNK_CONFIG_SOURCES", Value: splunkDefaults},
-				},
-				VolumeMounts: sharedMounts,
+				Env:             initEnv,
+				VolumeMounts:    sharedMounts,
 				SecurityContext: &corev1.SecurityContext{
 					RunAsUser:    &runAsUser,
 					RunAsNonRoot: &runAsNonRoot,

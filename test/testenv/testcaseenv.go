@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	wait "k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -347,44 +348,68 @@ func (testenv *TestCaseEnv) createRoleBinding() error {
 }
 
 func (testenv *TestCaseEnv) attachPVCToOperator(name string) error {
-	var err error
-
 	// volume name which refers to PVC to be attached
 	volumeName := "app-staging"
-
 	namespacedName := client.ObjectKey{Name: testenv.operatorName, Namespace: testenv.namespace}
-	operator := &appsv1.Deployment{}
-	err = testenv.GetKubeClient().Get(context.TODO(), namespacedName, operator)
+	ctx := context.TODO()
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		operator := &appsv1.Deployment{}
+		err := testenv.GetKubeClient().Get(ctx, namespacedName, operator)
+		if err != nil {
+			testenv.Log.Error(err, "Unable to get operator", "operator name", testenv.operatorName)
+			return err
+		}
+
+		volumePresent := false
+		for _, existing := range operator.Spec.Template.Spec.Volumes {
+			if existing.Name == volumeName {
+				volumePresent = true
+				break
+			}
+		}
+		if !volumePresent {
+			volume := corev1.Volume{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: name,
+					},
+				},
+			}
+			operator.Spec.Template.Spec.Volumes = append(operator.Spec.Template.Spec.Volumes, volume)
+		}
+
+		if len(operator.Spec.Template.Spec.Containers) == 0 {
+			return fmt.Errorf("operator deployment has no containers: %s", testenv.operatorName)
+		}
+
+		mountPresent := false
+		for _, existing := range operator.Spec.Template.Spec.Containers[0].VolumeMounts {
+			if existing.Name == volumeName {
+				mountPresent = true
+				break
+			}
+		}
+		if !mountPresent {
+			volumeMount := corev1.VolumeMount{
+				Name:      volumeName,
+				MountPath: splcommon.AppDownloadVolume,
+			}
+			operator.Spec.Template.Spec.Containers[0].VolumeMounts = append(operator.Spec.Template.Spec.Containers[0].VolumeMounts, volumeMount)
+		}
+
+		if err := testenv.GetKubeClient().Update(ctx, operator); err != nil {
+			if !errors.IsConflict(err) {
+				testenv.Log.Error(err, "Unable to update operator", "operator name", testenv.operatorName)
+			}
+			return err
+		}
+		return nil
+	})
 	if err != nil {
-		testenv.Log.Error(err, "Unable to get operator", "operator name", testenv.operatorName)
-		return err
+		testenv.Log.Error(err, "Unable to attach PVC to operator", "operator name", testenv.operatorName, "pvc name", name)
 	}
-
-	volume := corev1.Volume{
-		Name: volumeName,
-		VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: name,
-			},
-		},
-	}
-
-	operator.Spec.Template.Spec.Volumes = append(operator.Spec.Template.Spec.Volumes, volume)
-
-	volumeMount := corev1.VolumeMount{
-		Name:      volumeName,
-		MountPath: splcommon.AppDownloadVolume,
-	}
-
-	operator.Spec.Template.Spec.Containers[0].VolumeMounts = append(operator.Spec.Template.Spec.Containers[0].VolumeMounts, volumeMount)
-
-	// update the operator deployment now
-	err = testenv.GetKubeClient().Update(context.TODO(), operator)
-	if err != nil {
-		testenv.Log.Error(err, "Unable to update operator", "operator name", testenv.operatorName)
-		return err
-	}
-
 	return err
 }
 

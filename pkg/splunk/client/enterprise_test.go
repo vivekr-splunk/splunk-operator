@@ -485,6 +485,41 @@ func TestUpdateDMCGroups(t *testing.T) {
 	}
 	splunkClientTester(t, "TestUpdateDMCGroups", 201, "", wantRequest, test)
 }
+
+func TestUpdateDMCGroupsIgnoresMissingGroup404(t *testing.T) {
+	wantRequest, _ := http.NewRequest("POST", "https://localhost:8089/services/search/distributed/groups/dmc_group_indexer/edit", nil)
+	mockSplunkClient := &spltest.MockHTTPClient{}
+	body := `<?xml version="1.0" encoding="UTF-8"?>
+<response>
+  <messages>
+    <msg type="ERROR">There is no search group named dmc_group_indexer. Either the name you entered is incorrect or the search group has already been removed.</msg>
+  </messages>
+</response>`
+	mockSplunkClient.AddHandler(wantRequest, 404, body, nil)
+	c := NewSplunkClient("https://localhost:8089", "admin", "p@ssw0rd")
+	c.Client = mockSplunkClient
+
+	if err := c.UpdateDMCGroups("dmc_group_indexer", "splunk_cluster_master"); err != nil {
+		t.Fatalf("expected missing dmc group 404 to be ignored, got: %v", err)
+	}
+
+	mockSplunkClient.CheckRequests(t, "TestUpdateDMCGroupsIgnoresMissingGroup404")
+}
+
+func TestUpdateDMCGroupsReturnsErrorForOther404(t *testing.T) {
+	wantRequest, _ := http.NewRequest("POST", "https://localhost:8089/services/search/distributed/groups/dmc_group_indexer/edit", nil)
+	mockSplunkClient := &spltest.MockHTTPClient{}
+	mockSplunkClient.AddHandler(wantRequest, 404, `{"error":"some other not found"}`, nil)
+	c := NewSplunkClient("https://localhost:8089", "admin", "p@ssw0rd")
+	c.Client = mockSplunkClient
+
+	if err := c.UpdateDMCGroups("dmc_group_indexer", "splunk_cluster_master"); err == nil {
+		t.Fatalf("expected non-matching 404 response to return error")
+	}
+
+	mockSplunkClient.CheckRequests(t, "TestUpdateDMCGroupsReturnsErrorForOther404")
+}
+
 func TestUpdateDMCClusteringLabelGroup(t *testing.T) {
 	wantRequest, _ := http.NewRequest("POST", "https://localhost:8089/services/search/distributed/groups/dmc_indexerclustergroup_abc/edit", nil)
 	test := func(c SplunkClient) error {

@@ -16,6 +16,16 @@ fi
 PRIVATE_SPLUNK_OPERATOR_IMAGE="$1"
 PRIVATE_SPLUNK_ENTERPRISE_IMAGE="$2"
 
+# Keep test runtime image inputs deterministic.
+# Some upgrade specs read SPLUNK_ENTERPRISE_IMAGE_UPGRADE from environment
+# directly; if shell env is stale, that can diverge from -splunk-image and
+# cause image reconciliation loops and pull failures.
+ORIGINAL_SPLUNK_ENTERPRISE_IMAGE="${SPLUNK_ENTERPRISE_IMAGE}"
+export SPLUNK_ENTERPRISE_IMAGE="${PRIVATE_SPLUNK_ENTERPRISE_IMAGE}"
+if [[ -z "${SPLUNK_ENTERPRISE_IMAGE_UPGRADE}" || "${SPLUNK_ENTERPRISE_IMAGE_UPGRADE}" == "${ORIGINAL_SPLUNK_ENTERPRISE_IMAGE}" ]]; then
+  export SPLUNK_ENTERPRISE_IMAGE_UPGRADE="${PRIVATE_SPLUNK_ENTERPRISE_IMAGE}"
+fi
+
 rc=$(which go)
 if [ -z "$rc" ]; then
   echo "go is not installed or in the PATH. Exiting..."
@@ -146,6 +156,19 @@ echo "Setting telemetry test to true"
 kubectl patch configmap splunk-operator-manager-telemetry -n splunk-operator --type merge -p '{"data":{"status":"{\"test\":\"true\",\"lastTransmission\":\"\"}"}}'
 
 echo "Skipping following test :: ${TEST_TO_SKIP}"
+
+# Audit the exact multi-container image inputs used by this test run.
+echo "SPLUNK_POD_ARCH=${SPLUNK_POD_ARCH}"
+echo "SPLUNK_ENTERPRISE_IMAGE=${SPLUNK_ENTERPRISE_IMAGE}"
+echo "SPLUNK_ENTERPRISE_IMAGE_UPGRADE=${SPLUNK_ENTERPRISE_IMAGE_UPGRADE}"
+echo "RELATED_IMAGE_SPLUNK_INIT=${RELATED_IMAGE_SPLUNK_INIT}"
+echo "RELATED_IMAGE_SPLUNK_SIDECAR=${RELATED_IMAGE_SPLUNK_SIDECAR}"
+
+# Fail fast for M4 runs if the test cluster does not provide enough AZ diversity.
+if ! make -C "${topdir}" -s preflight-m4-az TEST_TO_RUN="${TEST_TO_RUN}" TEST_REGEX="${TEST_REGEX}"; then
+  echo "M4 AZ preflight failed. Aborting test run."
+  exit 1
+fi
 
 # Running only smoke test cases by default or value passed through TEST_FOCUS env variable. To run different test packages add/remove path from focus argument or TEST_FOCUS variable
 echo "ginkgo --junit-report=inttest.xml -v --keep-going --trace -r --timeout=7h  -nodes=${CLUSTER_NODES} --focus="${TEST_TO_RUN}" --skip="${TEST_TO_SKIP}" --output-interceptor-mode=none --cover ${topdir}/test/ -- -commit-hash=${COMMIT_HASH} -operator-image=${PRIVATE_SPLUNK_OPERATOR_IMAGE}  -splunk-image=${PRIVATE_SPLUNK_ENTERPRISE_IMAGE} -cluster-wide=${CLUSTER_WIDE}"

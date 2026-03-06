@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -65,6 +66,57 @@ func init() {
 	}
 }
 
+func TestBuildSHCEditSecretCommand(t *testing.T) {
+	adminPwd := `pa'ss:&$`
+	shcSecret := `sec'ret with spaces &$`
+	got := buildSHCEditSecretCommand(adminPwd, shcSecret)
+	want := `/opt/splunk/bin/splunk edit shcluster-config -auth 'admin:pa'"'"'ss:&$' -secret 'sec'"'"'ret with spaces &$'`
+	if got != want {
+		t.Fatalf("unexpected SHC secret command.\ngot:  %s\nwant: %s", got, want)
+	}
+}
+
+func TestBuildSHCAdminPasswordCommand(t *testing.T) {
+	adminPwd := `P@ss' w&rd`
+	got := buildSHCAdminPasswordCommand(adminPwd)
+	form := url.Values{"password": []string{adminPwd}}.Encode()
+	want := fmt.Sprintf("/opt/splunk/bin/splunk cmd splunkd rest --noauth POST /services/admin/users/admin %s", shellQuote(form))
+	if got != want {
+		t.Fatalf("unexpected SHC admin password command.\ngot:  %s\nwant: %s", got, want)
+	}
+	if strings.Contains(got, adminPwd) {
+		t.Fatalf("raw admin password leaked in command: %s", got)
+	}
+}
+
+func TestSearchHeadClusterFinishRecycleEmptyStatusIsRetryable(t *testing.T) {
+	mgr := &searchHeadClusterPodManager{
+		log: logr.Discard(),
+		cr: &enterpriseApi.SearchHeadCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "stack1",
+				Namespace: "test",
+			},
+			Status: enterpriseApi.SearchHeadClusterStatus{
+				Members: []enterpriseApi.SearchHeadClusterMemberStatus{
+					{
+						Name:   "splunk-stack1-search-head-0",
+						Status: "",
+					},
+				},
+			},
+		},
+	}
+
+	ready, err := mgr.FinishRecycle(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("FinishRecycle should not return error for empty member status; err=%v", err)
+	}
+	if ready {
+		t.Fatalf("FinishRecycle should keep waiting when member status is empty")
+	}
+}
+
 func TestApplySearchHeadCluster(t *testing.T) {
 	os.Setenv("SPLUNK_GENERAL_TERMS", "--accept-sgt-current-at-splunk-com")
 
@@ -78,6 +130,7 @@ func TestApplySearchHeadCluster(t *testing.T) {
 		{MetaName: "*v1.Service-test-splunk-stack1-search-head-headless"},
 		{MetaName: "*v1.Service-test-splunk-stack1-search-head-service"},
 
+		{MetaName: "*v1.Service-test-splunk-stack1-deployer-headless"},
 		{MetaName: "*v1.Service-test-splunk-stack1-deployer-service"},
 		{MetaName: "*v1.StatefulSet-test-splunk-stack1-deployer"},
 
@@ -98,6 +151,9 @@ func TestApplySearchHeadCluster(t *testing.T) {
 		{MetaName: "*v1.StatefulSet-test-splunk-stack1-search-head"},
 
 		{MetaName: "*v1.Secret-test-splunk-test-secret"},
+		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-0"},
+		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-1"},
+		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-2"},
 		{MetaName: "*v4.SearchHeadCluster-test-stack1"},
 		{MetaName: "*v4.SearchHeadCluster-test-stack1"},
 	}
@@ -109,6 +165,7 @@ func TestApplySearchHeadCluster(t *testing.T) {
 		{MetaName: "*v1.Service-test-splunk-stack1-search-head-headless"},
 		{MetaName: "*v1.Service-test-splunk-stack1-search-head-service"},
 
+		{MetaName: "*v1.Service-test-splunk-stack1-deployer-headless"},
 		{MetaName: "*v1.Service-test-splunk-stack1-deployer-service"},
 		{MetaName: "*v1.StatefulSet-test-splunk-stack1-deployer"},
 
@@ -127,6 +184,9 @@ func TestApplySearchHeadCluster(t *testing.T) {
 		{MetaName: "*v1.StatefulSet-test-splunk-stack1-search-head"},
 		{MetaName: "*v1.StatefulSet-test-splunk-stack1-search-head"},
 		{MetaName: "*v1.Secret-test-splunk-test-secret"},
+		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-0"},
+		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-1"},
+		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-2"},
 		{MetaName: "*v4.SearchHeadCluster-test-stack1"},
 		{MetaName: "*v4.SearchHeadCluster-test-stack1"},
 	}
@@ -142,8 +202,8 @@ func TestApplySearchHeadCluster(t *testing.T) {
 	listmockCall := []spltest.MockFuncCall{
 		{ListOpts: listOpts}}
 
-	createCalls := map[string][]spltest.MockFuncCall{"Get": funcCalls, "Create": {funcCalls[0], funcCalls[3], funcCalls[4], funcCalls[5], funcCalls[6], funcCalls[10], funcCalls[12], funcCalls[13], funcCalls[17], funcCalls[19]}, "Update": {funcCalls[0]}, "List": {listmockCall[0], listmockCall[0]}}
-	updateCalls := map[string][]spltest.MockFuncCall{"Get": createFuncCalls, "Update": {createFuncCalls[6], createFuncCalls[18]}, "List": {listmockCall[0], listmockCall[0]}}
+	createCalls := map[string][]spltest.MockFuncCall{"Get": funcCalls, "Create": {funcCalls[0], funcCalls[3], funcCalls[4], funcCalls[5], funcCalls[6], funcCalls[7], funcCalls[11], funcCalls[13], funcCalls[14], funcCalls[18], funcCalls[20]}, "Update": {funcCalls[0]}, "List": {listmockCall[0], listmockCall[0]}}
+	updateCalls := map[string][]spltest.MockFuncCall{"Get": createFuncCalls, "Update": {createFuncCalls[7], createFuncCalls[19]}, "List": {listmockCall[0], listmockCall[0]}}
 	statefulSet := enterpriseApi.SearchHeadCluster{
 		TypeMeta: metav1.TypeMeta{
 			Kind: "SearchHeadCluster",
@@ -278,7 +338,7 @@ func TestSearchHeadClusterPodManager(t *testing.T) {
 	listmockCall := []spltest.MockFuncCall{
 		{ListOpts: listOpts}}
 
-	wantCalls := map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2]}, "Create": {funcCalls[1]}}
+	wantCalls := map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2]}, "Create": {funcCalls[1]}}
 
 	// test API failure
 	method := "searchHeadClusterPodManager.Update(API failure)"
@@ -317,7 +377,7 @@ func TestSearchHeadClusterPodManager(t *testing.T) {
 		},
 	}
 	method = "searchHeadClusterPodManager.Update(All pods ready)"
-	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5]}, "Create": {funcCalls[1]}, "List": {listmockCall[0]}}
+	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5]}, "Create": {funcCalls[1]}, "List": {listmockCall[0]}}
 	searchHeadClusterPodManagerTester(t, method, mockHandlers, 1, enterpriseApi.PhaseReady, statefulSet, wantCalls, nil, statefulSet, pod)
 
 	// test pod needs update => transition to detention
@@ -337,7 +397,7 @@ func TestSearchHeadClusterPodManager(t *testing.T) {
 	)
 	pod.ObjectMeta.Labels["controller-revision-hash"] = "v0"
 	method = "searchHeadClusterPodManager.Update(Quarantine Pod)"
-	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5], funcCalls[2], funcCalls[2]}, "Create": {funcCalls[1]}}
+	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5], funcCalls[2], funcCalls[2]}, "Create": {funcCalls[1]}}
 	searchHeadClusterPodManagerTester(t, method, mockHandlers, 1, enterpriseApi.PhaseUpdating, statefulSet, wantCalls, nil, statefulSet, pod)
 
 	// test pod needs update => wait for searches to drain
@@ -345,13 +405,13 @@ func TestSearchHeadClusterPodManager(t *testing.T) {
 	mockHandlers[0].Body = strings.Replace(mockHandlers[0].Body, `"status":"Up"`, `"status":"ManualDetention"`, 1)
 	mockHandlers[0].Body = strings.Replace(mockHandlers[0].Body, `"active_historical_search_count":0`, `"active_historical_search_count":1`, 1)
 	method = "searchHeadClusterPodManager.Update(Draining Searches)"
-	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5]}, "Create": {funcCalls[1]}}
+	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5]}, "Create": {funcCalls[1]}}
 	searchHeadClusterPodManagerTester(t, method, mockHandlers, 1, enterpriseApi.PhaseUpdating, statefulSet, wantCalls, nil, statefulSet, pod)
 
 	// test pod needs update => delete pod
 	mockHandlers[0].Body = strings.Replace(mockHandlers[0].Body, `"active_historical_search_count":1`, `"active_historical_search_count":0`, 1)
 	method = "searchHeadClusterPodManager.Update(Delete Pod)"
-	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5]}, "Create": {funcCalls[1]}, "Delete": {funcCalls[5]}}
+	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5]}, "Create": {funcCalls[1]}, "Delete": {funcCalls[5]}}
 	searchHeadClusterPodManagerTester(t, method, mockHandlers, 1, enterpriseApi.PhaseUpdating, statefulSet, wantCalls, nil, statefulSet, pod)
 
 	// test pod update finished => release from detention
@@ -364,7 +424,7 @@ func TestSearchHeadClusterPodManager(t *testing.T) {
 		Body:   ``,
 	})
 	method = "searchHeadClusterPodManager.Update(Release Quarantine)"
-	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5], funcCalls[2]}, "Create": {funcCalls[1]}}
+	wantCalls = map[string][]spltest.MockFuncCall{"Get": {funcCalls[0], funcCalls[1], funcCalls[1], funcCalls[2], funcCalls[2], funcCalls[2], funcCalls[0], funcCalls[5], funcCalls[2]}, "Create": {funcCalls[1]}}
 	searchHeadClusterPodManagerTester(t, method, mockHandlers, 1, enterpriseApi.PhaseUpdating, statefulSet, wantCalls, nil, statefulSet, pod)
 
 	// test scale down => remove member
@@ -391,6 +451,8 @@ func TestSearchHeadClusterPodManager(t *testing.T) {
 		{MetaName: "*v1.StatefulSet-test-splunk-stack1"},
 		{MetaName: "*v1.Secret-test-splunk-test-secret"},
 		{MetaName: "*v1.Secret-test-splunk-test-secret"},
+		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-0"},
+		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-1"},
 		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-0"},
 		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-0"},
 		{MetaName: "*v1.Pod-test-splunk-stack1-search-head-1"},
@@ -542,10 +604,26 @@ func TestApplyShcSecret(t *testing.T) {
 
 	var mockPodExecClient *spltest.MockPodExecClient = &spltest.MockPodExecClient{}
 	mockPodExecClient.AddMockPodExecReturnContexts(ctx, podExecCommands, mockPodExecReturnContexts...)
-	// Set resource version as that of NS secret
+
+	// Set resource version as that of namespace secret so this first call is a no-op.
+	// Fake client resource versions are not guaranteed to be populated from the initial object,
+	// so set an explicit known value on both CR status and secret.
+	mgr.cr.Status.NamespaceSecretResourceVersion = "1"
+	nsSecret.ResourceVersion = mgr.cr.Status.NamespaceSecretResourceVersion
+	err = splutil.UpdateResource(ctx, c, nsSecret)
+	if err != nil {
+		t.Errorf("Couldn't update resource")
+	}
 	err = ApplyShcSecret(ctx, mgr, 1, mockPodExecClient)
 	if err != nil {
 		t.Errorf("Couldn't apply shc secret %s", err.Error())
+	}
+
+	// First-time sync path should force SHC secret sync when resource version is empty.
+	mgr.cr.Status.NamespaceSecretResourceVersion = ""
+	err = ApplyShcSecret(ctx, mgr, 1, mockPodExecClient)
+	if err == nil {
+		t.Errorf("Couldn't apply shc secret")
 	}
 
 	// Change resource version and test
@@ -621,6 +699,7 @@ func TestApplyShcSecret(t *testing.T) {
 
 	errMsg := fmt.Sprintf(splcommon.SecretTokenNotRetrievable, "shc_secret") + ", error: invalid secret data"
 
+	mgr.cr.Status.NamespaceSecretResourceVersion = "0"
 	err = ApplyShcSecret(ctx, mgr, 1, mockPodExecClient)
 	if err.Error() != errMsg {
 		t.Errorf("Couldn't recognize missing shc_secret %s", err.Error())
@@ -643,6 +722,7 @@ func TestApplyShcSecret(t *testing.T) {
 	}
 
 	errMsg = fmt.Sprintf(splcommon.SecretTokenNotRetrievable, "admin password") + ", error: invalid secret data"
+	mgr.cr.Status.NamespaceSecretResourceVersion = "0"
 	err = ApplyShcSecret(ctx, mgr, 1, mockPodExecClient)
 	if err.Error() != errMsg {
 		t.Errorf("Couldn't recognize missing admin password %s", err.Error())
@@ -659,6 +739,141 @@ func TestApplyShcSecret(t *testing.T) {
 	err = ApplyShcSecret(ctx, mgr, 1, mockPodExecClient)
 	if err != nil {
 		t.Errorf("Couldn't apply shc secret %s", err.Error())
+	}
+}
+
+func TestApplyShcSecretUsesSidecarInMultiContainerMode(t *testing.T) {
+	ctx := context.TODO()
+	t.Setenv("SPLUNK_POD_ARCH", "multi-container")
+	t.Setenv("CLUSTER_DOMAIN", "cluster.local")
+
+	c := spltest.NewMockClient()
+
+	// Namespace-scoped secret reflects desired values.
+	nsSecret, err := splutil.ApplyNamespaceScopedSecretObject(ctx, c, "test")
+	if err != nil {
+		t.Fatalf("apply namespace scoped secret: %v", err)
+	}
+	nsSecret.Data["password"] = []byte("new-admin-password")
+	nsSecret.Data["shc_secret"] = []byte("new-shc-secret")
+	if err := splutil.UpdateResource(ctx, c, nsSecret); err != nil {
+		t.Fatalf("update namespace scoped secret: %v", err)
+	}
+
+	// Search head pod and mounted pod secret still have old values.
+	podSecretName := "stack1-secrets"
+	shPodName := "splunk-stack1-search-head-0"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      shPodName,
+			Namespace: "test",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "splunk", Image: "splunk/splunk:latest"}},
+			Volumes: []corev1.Volume{
+				{
+					Name: "mnt-splunk-secrets",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{SecretName: podSecretName},
+					},
+				},
+			},
+		},
+	}
+	if err := c.Create(ctx, pod); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+
+	podSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podSecretName,
+			Namespace: "test",
+		},
+		Data: map[string][]byte{
+			"password":   []byte("old-admin-password"),
+			"shc_secret": []byte("old-shc-secret"),
+		},
+	}
+	if err := c.Create(ctx, podSecret); err != nil {
+		t.Fatalf("create pod secret: %v", err)
+	}
+
+	mockSplunkClient := &spltest.MockHTTPClient{}
+	restartURL := "https://splunk-stack1-search-head-0.splunk-stack1-search-head-headless.test.svc.cluster.local:8089/services/server/control/restart"
+	mockSplunkClient.AddHandlers(
+		spltest.MockHTTPHandler{Method: "POST", URL: restartURL, Status: 200, Err: nil},
+		spltest.MockHTTPHandler{Method: "POST", URL: restartURL, Status: 200, Err: nil},
+	)
+
+	cr := enterpriseApi.SearchHeadCluster{
+		TypeMeta: metav1.TypeMeta{Kind: "SearchHeadCluster"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "stack1",
+			Namespace: "test",
+		},
+	}
+	cr.SetGroupVersionKind(enterpriseApi.GroupVersion.WithKind("SearchHeadCluster"))
+	cr.Status.NamespaceSecretResourceVersion = nsSecret.ResourceVersion + "-old"
+	cr.Status.AdminPasswordChangedSecrets = make(map[string]bool)
+
+	mgr := &searchHeadClusterPodManager{
+		c:       c,
+		log:     logt.WithName("TestApplyShcSecretUsesSidecarInMultiContainerMode"),
+		cr:      &cr,
+		secrets: podSecret,
+		newSplunkClient: func(managementURI, username, password string) *splclient.SplunkClient {
+			cl := splclient.NewSplunkClient(managementURI, username, password)
+			cl.Client = mockSplunkClient
+			return cl
+		},
+	}
+
+	originalSecretUpdate := postSidecarSHCSecretUpdate
+	originalPasswordRotate := postSidecarSHCPasswordRotate
+	defer func() {
+		postSidecarSHCSecretUpdate = originalSecretUpdate
+		postSidecarSHCPasswordRotate = originalPasswordRotate
+	}()
+
+	var secretEndpoint, passwordEndpoint string
+	var secretReq, passwordReq map[string]string
+
+	postSidecarSHCSecretUpdate = func(_ context.Context, endpoint string, body []byte) error {
+		secretEndpoint = endpoint
+		return json.Unmarshal(body, &secretReq)
+	}
+	postSidecarSHCPasswordRotate = func(_ context.Context, endpoint string, body []byte) error {
+		passwordEndpoint = endpoint
+		return json.Unmarshal(body, &passwordReq)
+	}
+
+	mockPodExecClient := &spltest.MockPodExecClient{}
+	if err := ApplyShcSecret(ctx, mgr, 1, mockPodExecClient); err != nil {
+		t.Fatalf("ApplyShcSecret should succeed in sidecar mode: %v", err)
+	}
+
+	wantSecretEndpoint := "http://splunk-stack1-search-head-0.splunk-stack1-search-head-headless.test.svc.cluster.local:8080/api/v1/admin/shc/secret"
+	if secretEndpoint != wantSecretEndpoint {
+		t.Fatalf("unexpected SHC secret endpoint: got=%q want=%q", secretEndpoint, wantSecretEndpoint)
+	}
+	if secretReq["secret"] != "new-shc-secret" {
+		t.Fatalf("unexpected SHC secret request: %#v", secretReq)
+	}
+
+	wantPasswordEndpoint := "http://splunk-stack1-search-head-0.splunk-stack1-search-head-headless.test.svc.cluster.local:8080/api/v1/auth/password"
+	if passwordEndpoint != wantPasswordEndpoint {
+		t.Fatalf("unexpected password endpoint: got=%q want=%q", passwordEndpoint, wantPasswordEndpoint)
+	}
+	if passwordReq["username"] != "admin" || passwordReq["currentPassword"] != "old-admin-password" || passwordReq["newPassword"] != "new-admin-password" {
+		t.Fatalf("unexpected password rotate request: %#v", passwordReq)
+	}
+
+	updatedPodSecret := &corev1.Secret{}
+	if err := c.Get(ctx, types.NamespacedName{Name: podSecretName, Namespace: "test"}, updatedPodSecret); err != nil {
+		t.Fatalf("get updated pod secret: %v", err)
+	}
+	if string(updatedPodSecret.Data["password"]) != "new-admin-password" {
+		t.Fatalf("expected pod secret password update, got %q", string(updatedPodSecret.Data["password"]))
 	}
 }
 

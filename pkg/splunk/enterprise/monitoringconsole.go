@@ -17,6 +17,8 @@ package enterprise
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"reflect"
 	"sort"
@@ -48,6 +50,7 @@ func ApplyMonitoringConsole(ctx context.Context, client splcommon.ControllerClie
 	}
 	reqLogger := log.FromContext(ctx)
 	scopedLog := reqLogger.WithName("ApplyMonitoringConsole")
+	previousPhase := cr.Status.Phase
 
 	eventPublisher := GetEventPublisher(ctx, cr)
 	ctx = context.WithValue(ctx, splcommon.EventPublisherKey, eventPublisher)
@@ -146,8 +149,13 @@ func ApplyMonitoringConsole(ctx context.Context, client splcommon.ControllerClie
 	if !statefulSet.CreationTimestamp.IsZero() {
 		// check if the Monitoring Console is ready for version upgrade, if required
 		continueReconcile, err := UpgradePathValidation(ctx, client, cr, cr.Spec.CommonSplunkSpec, nil)
-		if err != nil || !continueReconcile {
+		if err != nil {
 			return result, err
+		}
+		if !continueReconcile {
+			scopedLog.Info("Monitoring console pending: waiting for upgrade path validation", "statefulset", statefulSet.GetName())
+			cr.Status.Phase = enterpriseApi.PhasePending
+			return result, nil
 		}
 	}
 
@@ -158,6 +166,23 @@ func ApplyMonitoringConsole(ctx context.Context, client splcommon.ControllerClie
 		return result, err
 	}
 	cr.Status.Phase = phase
+	if statefulSet.Spec.Replicas != nil {
+		scopedLog.V(1).Info("Monitoring console pod manager result",
+			"phase", phase,
+			"readyReplicas", statefulSet.Status.ReadyReplicas,
+			"desiredReplicas", *statefulSet.Spec.Replicas)
+	}
+	if previousPhase != cr.Status.Phase {
+		desiredReplicas := int32(0)
+		if statefulSet.Spec.Replicas != nil {
+			desiredReplicas = *statefulSet.Spec.Replicas
+		}
+		scopedLog.Info("Monitoring console phase transition",
+			"from", previousPhase,
+			"to", cr.Status.Phase,
+			"readyReplicas", statefulSet.Status.ReadyReplicas,
+			"desiredReplicas", desiredReplicas)
+	}
 
 	// no need to requeue if everything is ready
 	if cr.Status.Phase == enterpriseApi.PhaseReady {
@@ -199,11 +224,35 @@ func getMonitoringConsoleStatefulSet(ctx context.Context, client splcommon.Contr
 	if err != nil {
 		return nil, err
 	}
-	ss.Spec.Template.ObjectMeta.Annotations[monitoringConsoleConfigRev] = monitoringConsoleConfigMap.ResourceVersion
+	configHash := getMonitoringConsoleConfigDataHash(monitoringConsoleConfigMap.Data)
+	ss.Spec.Template.ObjectMeta.Annotations[monitoringConsoleConfigRev] = configHash
 
 	// Setup App framework staging volume for apps
 	setupAppsStagingVolume(ctx, client, cr, &ss.Spec.Template, &cr.Spec.AppFrameworkConfig)
 	return ss, nil
+}
+
+func getMonitoringConsoleConfigDataHash(configMapData map[string]string) string {
+	if len(configMapData) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(configMapData))
+	for key := range configMapData {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var payload strings.Builder
+	for _, key := range keys {
+		payload.WriteString(key)
+		payload.WriteString("=")
+		payload.WriteString(configMapData[key])
+		payload.WriteString("\n")
+	}
+
+	hash := sha256.Sum256([]byte(payload.String()))
+	return hex.EncodeToString(hash[:])
 }
 
 // helper function to get the list of MonitoringConsole types in the current namespace

@@ -201,12 +201,15 @@ install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~
 	$(KUSTOMIZE) build config/crd | kubectl apply --server-side --force-conflicts -f -
 
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build config/crd | kubectl delete --ignore-not-found=${ignore-not-found} -f -
+	$(KUSTOMIZE) build config/crd | kubectl delete --wait=false --ignore-not-found=${ignore-not-found} -f -
 
-deploy: manifests kustomize uninstall ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	$(SED) "s/namespace: splunk-operator/namespace: ${NAMESPACE}/g"  config/${ENVIRONMENT}/kustomization.yaml
 	$(SED) "s/value: WATCH_NAMESPACE_VALUE/value: \"${WATCH_NAMESPACE}\"/g"  config/${ENVIRONMENT}/kustomization.yaml
 	$(SED) "s|SPLUNK_ENTERPRISE_IMAGE|${SPLUNK_ENTERPRISE_IMAGE}|g"  config/${ENVIRONMENT}/kustomization.yaml
+	$(SED) "s/value: SPLUNK_POD_ARCH_VALUE/value: \"${SPLUNK_POD_ARCH}\"/g"  config/${ENVIRONMENT}/kustomization.yaml
+	$(SED) "s|RELATED_IMAGE_SPLUNK_INIT_VALUE|${RELATED_IMAGE_SPLUNK_INIT}|g"  config/${ENVIRONMENT}/kustomization.yaml
+	$(SED) "s|RELATED_IMAGE_SPLUNK_SIDECAR_VALUE|${RELATED_IMAGE_SPLUNK_SIDECAR}|g"  config/${ENVIRONMENT}/kustomization.yaml
 	$(SED) "s/value: SPLUNK_GENERAL_TERMS_VALUE/value: \"${SPLUNK_GENERAL_TERMS}\"/g"  config/${ENVIRONMENT}/kustomization.yaml
 	$(SED) 's/\("sokVersion": \)"[^"]*"/\1"$(VERSION)"/' config/manager/controller_manager_telemetry.yaml
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
@@ -214,6 +217,9 @@ deploy: manifests kustomize uninstall ## Deploy controller to the K8s cluster sp
 	$(SED) "s/namespace: ${NAMESPACE}/namespace: splunk-operator/g"  config/${ENVIRONMENT}/kustomization.yaml
 	$(SED) "s/value: \"${WATCH_NAMESPACE}\"/value: WATCH_NAMESPACE_VALUE/g"  config/${ENVIRONMENT}/kustomization.yaml
 	$(SED) "s|${SPLUNK_ENTERPRISE_IMAGE}|SPLUNK_ENTERPRISE_IMAGE|g"  config/${ENVIRONMENT}/kustomization.yaml
+	$(SED) "s/value: \"${SPLUNK_POD_ARCH}\"/value: SPLUNK_POD_ARCH_VALUE/g"  config/${ENVIRONMENT}/kustomization.yaml
+	$(SED) "s|${RELATED_IMAGE_SPLUNK_INIT}|RELATED_IMAGE_SPLUNK_INIT_VALUE|g"  config/${ENVIRONMENT}/kustomization.yaml
+	$(SED) "s|${RELATED_IMAGE_SPLUNK_SIDECAR}|RELATED_IMAGE_SPLUNK_SIDECAR_VALUE|g"  config/${ENVIRONMENT}/kustomization.yaml
 	$(SED) "s/value: \"${SPLUNK_GENERAL_TERMS}\"/value: SPLUNK_GENERAL_TERMS_VALUE/g"  config/${ENVIRONMENT}/kustomization.yaml
 
 undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
@@ -365,6 +371,10 @@ cluster-down:
 int-test:
 	@echo Run integration test
 	@test/run-tests.sh
+
+.PHONY: preflight-m4-az
+preflight-m4-az: ## Fail fast for M4 runs when Ready nodes are in fewer than 3 AZs
+	@test/preflight-m4-az.sh
 
 lang:
 	@echo Running bias language linter

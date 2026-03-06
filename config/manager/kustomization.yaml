@@ -16,6 +16,6 @@ configMapGenerator:
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
-- name: controller
-  newName: docker.io/splunk/splunk-operator
-  newTag: 3.0.0
+- digest: sha256:87403e998bffdc00aa00d0f8826293de19a3e8a52d0976df8e2db81959d68c87
+  name: controller
+  newName: us-west2-docker.pkg.dev/cmp-gke/splunk/docker.io/splunk/splunk-operator

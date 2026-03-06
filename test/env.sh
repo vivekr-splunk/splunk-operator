@@ -2,6 +2,7 @@
 
 : "${SPLUNK_OPERATOR_IMAGE:=splunk/splunk-operator:latest}"
 : "${SPLUNK_ENTERPRISE_IMAGE:=splunk/splunk:latest}"
+: "${SPLUNK_ENTERPRISE_IMAGE_UPGRADE:=${SPLUNK_ENTERPRISE_IMAGE}}"
 : "${CLUSTER_PROVIDER:=eks}"
 : "${CLUSTER_NAME:=integration-test-cluster-eks}"
 : "${NUM_WORKERS:=3}"
@@ -105,3 +106,4 @@ fi
 : "${RELATED_IMAGE_SPLUNK_SIDECAR:=${PRIVATE_REGISTRY}/splunk-sidecar:latest}"
 export RELATED_IMAGE_SPLUNK_INIT
 export RELATED_IMAGE_SPLUNK_SIDECAR
+export SPLUNK_ENTERPRISE_IMAGE_UPGRADE

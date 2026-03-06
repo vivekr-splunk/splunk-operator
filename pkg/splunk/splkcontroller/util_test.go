@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestMergePodUpdates(t *testing.T) {
@@ -263,6 +264,13 @@ func TestMergeServiceSpecUpdates(t *testing.T) {
 	matcher = func() bool { return current.Type == revised.Type }
 	svcUpdateTester("Service Type changed")
 
+	// Empty revised type should be treated as ClusterIP and not force updates.
+	current.Type = corev1.ServiceTypeClusterIP
+	revised.Type = ""
+	if MergeServiceSpecUpdates(ctx, &current, &revised, name) {
+		t.Errorf("MergeServiceSpecUpdates() returned %t; want %t when revised type is empty", true, false)
+	}
+
 	current.ExternalName = "splunk.example.com"
 	revised.ExternalName = "splunk2.example.com"
 	matcher = func() bool { return current.ExternalName == revised.ExternalName }
@@ -272,6 +280,31 @@ func TestMergeServiceSpecUpdates(t *testing.T) {
 	revised.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeCluster
 	matcher = func() bool { return current.ExternalTrafficPolicy == revised.ExternalTrafficPolicy }
 	svcUpdateTester("Service ExternalTrafficPolicy changed")
+}
+
+func TestMergePodMetaUpdatesIgnoresImageTagAnnotation(t *testing.T) {
+	ctx := context.TODO()
+	name := "test-pod"
+
+	current := metav1.ObjectMeta{
+		Annotations: map[string]string{"one": "two"},
+	}
+	revised := metav1.ObjectMeta{
+		Annotations: map[string]string{"one": "two", "splunk/image-tag": "img-a"},
+	}
+	if MergePodMetaUpdates(ctx, &current, &revised, name) {
+		t.Errorf("MergePodMetaUpdates() returned %t; want %t when only splunk/image-tag differs", true, false)
+	}
+
+	current = metav1.ObjectMeta{
+		Annotations: map[string]string{"one": "two", "splunk/image-tag": "img-a"},
+	}
+	revised = metav1.ObjectMeta{
+		Annotations: map[string]string{"one": "two"},
+	}
+	if MergePodMetaUpdates(ctx, &current, &revised, name) {
+		t.Errorf("MergePodMetaUpdates() returned %t; want %t when only splunk/image-tag differs", true, false)
+	}
 }
 
 func TestSortStatefulSetSlices(t *testing.T) {

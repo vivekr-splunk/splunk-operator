@@ -5,6 +5,8 @@ build/_test
 ### Emacs ###
 # -*- mode: gitignore; -*-
 *~
+*.log
+**/test/*.tgz
 \#*\#
 /.emacs.desktop
 /.emacs.desktop.lock
@@ -101,3 +103,5 @@ kubeconfig
 .devcontainer/devcontainer.json
 kuttl-artifacts/*
 .skaffold/
+test/run-20260302T202928Z-full-all.log
+*.tgz

@@ -60,8 +60,18 @@ func (mgr *searchHeadClusterPodManager) Update(ctx context.Context, c splcommon.
 	// for now pass the targetPodName as empty since we are going to fill it in ApplyShcSecret
 	podExecClient := splutil.GetPodExecClient(mgr.c, mgr.cr, "")
 
+	// Secret sync must run against actual SH pods. desiredReplicas can be zero
+	// when the CR relies on defaults while the StatefulSet is already at 3.
+	secretSyncReplicas := desiredReplicas
+	if statefulSet.Spec.Replicas != nil && *statefulSet.Spec.Replicas > secretSyncReplicas {
+		secretSyncReplicas = *statefulSet.Spec.Replicas
+	}
+	if mgr.cr.Status.Replicas > secretSyncReplicas {
+		secretSyncReplicas = mgr.cr.Status.Replicas
+	}
+
 	// Check if a recycle of shc pods is necessary(due to shc_secret mismatch with namespace scoped secret)
-	err = ApplyShcSecret(ctx, mgr, desiredReplicas, podExecClient)
+	err = ApplyShcSecret(ctx, mgr, secretSyncReplicas, podExecClient)
 	if err != nil {
 		return enterpriseApi.PhaseError, err
 	}
@@ -203,6 +213,12 @@ func (mgr *searchHeadClusterPodManager) FinishRecycle(ctx context.Context, n int
 		mgr.log.Info("Releasing search head cluster member from detention", "memberName", memberName)
 		c := mgr.getClient(ctx, n)
 		return false, c.SetSearchHeadDetention(false)
+
+	case "":
+		// Member status can be briefly empty while Splunkd is restarting.
+		// Keep reconcile in updating state and retry instead of surfacing hard errors.
+		mgr.log.Info("Search head cluster member status not available yet", "memberName", memberName)
+		return false, nil
 	}
 
 	// unhandled status
@@ -241,17 +257,22 @@ func (mgr *searchHeadClusterPodManager) getClient(ctx context.Context, n int32) 
 	// Get Pod Name
 	memberName := GetSplunkStatefulsetPodName(SplunkSearchHead, mgr.cr.GetName(), n)
 
-	// Get Fully Qualified Domain Name
-	fqdnName := splcommon.GetServiceFQDN(mgr.cr.GetNamespace(),
-		fmt.Sprintf("%s.%s", memberName, GetSplunkServiceName(SplunkSearchHead, mgr.cr.GetName(), true)))
-
 	// Retrieve admin password from Pod
 	adminPwd, err := splutil.GetSpecificSecretTokenFromPod(ctx, mgr.c, memberName, mgr.cr.GetNamespace(), "password")
 	if err != nil {
 		scopedLog.Error(err, "Couldn't retrieve the admin password from Pod")
 	}
 
-	return mgr.newSplunkClient(fmt.Sprintf("https://%s:8089", fqdnName), "admin", adminPwd)
+	return mgr.getClientWithPassword(n, adminPwd)
+}
+
+func (mgr *searchHeadClusterPodManager) getClientWithPassword(n int32, password string) *splclient.SplunkClient {
+	memberName := GetSplunkStatefulsetPodName(SplunkSearchHead, mgr.cr.GetName(), n)
+	fqdnName := splcommon.GetServiceFQDN(
+		mgr.cr.GetNamespace(),
+		fmt.Sprintf("%s.%s", memberName, GetSplunkServiceName(SplunkSearchHead, mgr.cr.GetName(), true)),
+	)
+	return mgr.newSplunkClient(fmt.Sprintf("https://%s:8089", fqdnName), "admin", password)
 }
 
 // GetSearchHeadClusterMemberInfo used in mocking this function

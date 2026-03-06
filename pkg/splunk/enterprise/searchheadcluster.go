@@ -16,9 +16,14 @@
 package enterprise
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"time"
@@ -37,6 +42,74 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+// shellQuote wraps a value in single quotes and escapes embedded single quotes
+// so it can be safely embedded in /bin/sh command strings.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func buildSHCEditSecretCommand(adminPwd, shcSecret string) string {
+	auth := shellQuote(fmt.Sprintf("admin:%s", adminPwd))
+	secret := shellQuote(shcSecret)
+	return fmt.Sprintf("/opt/splunk/bin/splunk edit shcluster-config -auth %s -secret %s", auth, secret)
+}
+
+func buildSHCAdminPasswordCommand(newAdminPassword string) string {
+	passwordForm := url.Values{"password": []string{newAdminPassword}}.Encode()
+	return fmt.Sprintf("/opt/splunk/bin/splunk cmd splunkd rest --noauth POST /services/admin/users/admin %s", shellQuote(passwordForm))
+}
+
+var postSidecarSHCSecretUpdate = func(ctx context.Context, endpoint string, body []byte) error {
+	return postSidecarSHCRequest(ctx, endpoint, body)
+}
+
+var postSidecarSHCPasswordRotate = func(ctx context.Context, endpoint string, body []byte) error {
+	return postSidecarSHCRequest(ctx, endpoint, body)
+}
+
+func postSidecarSHCRequest(ctx context.Context, endpoint string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if len(payload) == 0 {
+		return fmt.Errorf("status=%d", resp.StatusCode)
+	}
+	return fmt.Errorf("status=%d body=%s", resp.StatusCode, string(payload))
+}
+
+func shcSidecarEndpoint(cr *enterpriseApi.SearchHeadCluster, podName, path string) string {
+	serviceName := GetSplunkServiceName(SplunkSearchHead, cr.GetName(), true)
+	host := splcommon.GetServiceFQDN(cr.GetNamespace(), fmt.Sprintf("%s.%s", podName, serviceName))
+	return fmt.Sprintf("http://%s:8080%s", host, path)
+}
+
+func isSHCPodSecretUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.Error() {
+	case splcommon.PodNotFoundError:
+		return true
+	}
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "empty pod spec volumes") ||
+		strings.Contains(errMsg, "didn't find secret volume source in any pod volume")
+}
 
 // ApplySearchHeadCluster reconciles the state for a Splunk Enterprise search head cluster.
 func ApplySearchHeadCluster(ctx context.Context, client splcommon.ControllerClient, cr *enterpriseApi.SearchHeadCluster) (reconcile.Result, error) {
@@ -157,6 +230,12 @@ func ApplySearchHeadCluster(ctx context.Context, client splcommon.ControllerClie
 		return result, err
 	}
 
+	// create or update a headless deployer service
+	err = splctrl.ApplyService(ctx, client, getSplunkService(ctx, cr, &cr.Spec.CommonSplunkSpec, SplunkDeployer, true))
+	if err != nil {
+		return result, err
+	}
+
 	// create or update a deployer service
 	err = splctrl.ApplyService(ctx, client, getSplunkService(ctx, cr, &cr.Spec.CommonSplunkSpec, SplunkDeployer, false))
 	if err != nil {
@@ -172,8 +251,13 @@ func ApplySearchHeadCluster(ctx context.Context, client splcommon.ControllerClie
 	// CSPL-3060 - If statefulSet is not created, avoid upgrade path validation
 	if !statefulSet.CreationTimestamp.IsZero() {
 		continueReconcile, err := UpgradePathValidation(ctx, client, cr, cr.Spec.CommonSplunkSpec, nil)
-		if err != nil || !continueReconcile {
+		if err != nil {
 			return result, err
+		}
+		if !continueReconcile {
+			cr.Status.Phase = enterpriseApi.PhasePending
+			cr.Status.DeployerPhase = enterpriseApi.PhasePending
+			return result, nil
 		}
 	}
 
@@ -272,12 +356,12 @@ func ApplyShcSecret(ctx context.Context, mgr *searchHeadClusterPodManager, repli
 	reqLogger := log.FromContext(ctx)
 	scopedLog := reqLogger.WithName("ApplyShcSecret").WithValues("Desired replicas", replicas, "ShcSecretChanged", mgr.cr.Status.ShcSecretChanged, "AdminSecretChanged", mgr.cr.Status.AdminSecretChanged, "CrStatusNamespaceSecretResourceVersion", mgr.cr.Status.NamespaceSecretResourceVersion, "NamespaceSecretResourceVersion", namespaceSecret.GetObjectMeta().GetResourceVersion())
 
+	forceShcSecretSync := false
 	// If namespace scoped secret revision is the same ignore
 	if len(mgr.cr.Status.NamespaceSecretResourceVersion) == 0 {
-		// First time, set resource version in CR
-		scopedLog.Info("Setting CrStatusNamespaceSecretResourceVersion for the first time")
-		mgr.cr.Status.NamespaceSecretResourceVersion = namespaceSecret.ObjectMeta.ResourceVersion
-		return nil
+		// First time: force SHC secret sync so pass4SymmKey is explicitly set on all peers.
+		scopedLog.Info("Namespace secret resource version empty; forcing initial SHC secret sync")
+		forceShcSecretSync = true
 	} else if mgr.cr.Status.NamespaceSecretResourceVersion == namespaceSecret.ObjectMeta.ResourceVersion {
 		// If resource version hasn't changed don't return
 		return nil
@@ -303,6 +387,10 @@ func ApplyShcSecret(ctx context.Context, mgr *searchHeadClusterPodManager, repli
 		// Retrieve shc_secret password from Pod
 		shcSecret, err := splutil.GetSpecificSecretTokenFromPod(ctx, mgr.c, shPodName, mgr.cr.GetNamespace(), "shc_secret")
 		if err != nil {
+			if isSHCPodSecretUnavailableError(err) {
+				scopedLog.Info("Skipping SHC secret sync for pod; pod secret not available yet", "error", err.Error())
+				continue
+			}
 			return fmt.Errorf("couldn't retrieve shc_secret from secret data, error: %s", err.Error())
 		}
 
@@ -314,11 +402,16 @@ func ApplyShcSecret(ctx context.Context, mgr *searchHeadClusterPodManager, repli
 		// Retrieve admin password from Pod
 		adminPwd, err := splutil.GetSpecificSecretTokenFromPod(ctx, mgr.c, shPodName, mgr.cr.GetNamespace(), "password")
 		if err != nil {
+			if isSHCPodSecretUnavailableError(err) {
+				scopedLog.Info("Skipping admin password sync for pod; pod secret not available yet", "error", err.Error())
+				continue
+			}
 			return fmt.Errorf("couldn't retrieve admin password from secret data, error: %s", err.Error())
 		}
 
-		// If shc secret is different from namespace scoped secret change it
-		if shcSecret != nsShcSecret {
+		// If SHC secret is different from namespace secret, or during initial sync,
+		// set it explicitly on each SH member.
+		if forceShcSecretSync || shcSecret != nsShcSecret {
 			scopedLog.Info("shcSecret different from namespace scoped secret, changing shc secret")
 			// If shc secret already changed, ignore
 			if i < int32(len(mgr.cr.Status.ShcSecretChanged)) {
@@ -327,11 +420,21 @@ func ApplyShcSecret(ctx context.Context, mgr *searchHeadClusterPodManager, repli
 				}
 			}
 
-			// Change shc secret key
-			command := fmt.Sprintf("/opt/splunk/bin/splunk edit shcluster-config -auth admin:%s -secret %s", adminPwd, nsShcSecret)
-			streamOptions.Stdin = strings.NewReader(command)
-
-			_, _, err = podExecClient.RunPodExecCommand(ctx, streamOptions, []string{"/bin/sh"})
+			if isMultiContainerPodEnabled() {
+				reqBody, marshalErr := json.Marshal(map[string]string{
+					"secret": nsShcSecret,
+				})
+				if marshalErr != nil {
+					return marshalErr
+				}
+				endpoint := shcSidecarEndpoint(mgr.cr, shPodName, "/api/v1/admin/shc/secret")
+				err = postSidecarSHCSecretUpdate(ctx, endpoint, reqBody)
+			} else {
+				// Change SHC secret key; quote values to handle shell metacharacters safely.
+				command := buildSHCEditSecretCommand(adminPwd, nsShcSecret)
+				streamOptions.Stdin = strings.NewReader(command)
+				_, _, err = podExecClient.RunPodExecCommand(ctx, streamOptions, []string{"/bin/sh"})
+			}
 			if err != nil {
 				// Emit event for password sync failure
 				if eventPublisher != nil {
@@ -375,10 +478,23 @@ func ApplyShcSecret(ctx context.Context, mgr *searchHeadClusterPodManager, repli
 				}
 			}
 
-			// Change admin password on splunk instance of pod
-			command := fmt.Sprintf("/opt/splunk/bin/splunk cmd splunkd rest --noauth POST /services/admin/users/admin 'password=%s'", nsAdminSecret)
-			streamOptions.Stdin = strings.NewReader(command)
-			_, _, err = podExecClient.RunPodExecCommand(ctx, streamOptions, []string{"/bin/sh"})
+			if isMultiContainerPodEnabled() {
+				reqBody, marshalErr := json.Marshal(map[string]string{
+					"username":        "admin",
+					"currentPassword": adminPwd,
+					"newPassword":     nsAdminSecret,
+				})
+				if marshalErr != nil {
+					return marshalErr
+				}
+				endpoint := shcSidecarEndpoint(mgr.cr, shPodName, "/api/v1/auth/password")
+				err = postSidecarSHCPasswordRotate(ctx, endpoint, reqBody)
+			} else {
+				// Change admin password on splunk instance of pod.
+				command := buildSHCAdminPasswordCommand(nsAdminSecret)
+				streamOptions.Stdin = strings.NewReader(command)
+				_, _, err = podExecClient.RunPodExecCommand(ctx, streamOptions, []string{"/bin/sh"})
+			}
 			if err != nil {
 				return err
 			}
@@ -386,6 +502,9 @@ func ApplyShcSecret(ctx context.Context, mgr *searchHeadClusterPodManager, repli
 
 			// Get client for Pod and restart splunk instance on pod
 			shClient := mgr.getClient(ctx, i)
+			if isMultiContainerPodEnabled() {
+				shClient = mgr.getClientWithPassword(i, nsAdminSecret)
+			}
 			err = shClient.RestartSplunk()
 			if err != nil {
 				return err
@@ -433,6 +552,9 @@ func ApplyShcSecret(ctx context.Context, mgr *searchHeadClusterPodManager, repli
 			scopedLog.Info("admin password changed on the secret mounted on pod")
 		}
 	}
+
+	// Mark namespace secret version as synced only after successful reconciliation.
+	mgr.cr.Status.NamespaceSecretResourceVersion = namespaceSecret.ObjectMeta.ResourceVersion
 
 	// Emit event for password sync completed
 	if eventPublisher != nil {

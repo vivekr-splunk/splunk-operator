@@ -105,3 +105,61 @@ func TestUpdateSplunkPodTemplateWithConfig_MultiContainerInjectsInitSidecarAndHT
 	_ = os.Unsetenv("RELATED_IMAGE_SPLUNK_INIT")
 	_ = os.Unsetenv("RELATED_IMAGE_SPLUNK_SIDECAR")
 }
+
+func TestUpdateSplunkPodTemplateWithConfig_MultiContainerInitReceivesClusterEnv(t *testing.T) {
+	t.Setenv("SPLUNK_POD_ARCH", "multi-container")
+	t.Setenv("RELATED_IMAGE_SPLUNK_INIT", "test/splunk-init:latest")
+
+	ctx := context.TODO()
+	client := spltest.NewMockClient()
+
+	cr := &enterpriseApi.SearchHeadCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "stack1",
+			Namespace: "test",
+		},
+	}
+
+	pod := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "splunk", Image: "test/splunk:latest"},
+			},
+		},
+	}
+
+	spec := &enterpriseApi.CommonSplunkSpec{}
+	extraEnv := []corev1.EnvVar{
+		{Name: "SPLUNK_DEPLOYER_URL", Value: "splunk-stack1-deployer-service"},
+		{Name: "SPLUNK_CLUSTER_MASTER_URL", Value: "splunk-stack1-cluster-manager-service"},
+	}
+	updateSplunkPodTemplateWithConfig(ctx, client, pod, cr, spec, SplunkSearchHead, extraEnv, "dummy-secret")
+
+	var init *corev1.Container
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == "splunk-init" {
+			init = &pod.Spec.InitContainers[i]
+			break
+		}
+	}
+	if init == nil {
+		t.Fatalf("expected init container splunk-init to be injected")
+	}
+
+	envMap := make(map[string]string)
+	for _, e := range init.Env {
+		envMap[e.Name] = e.Value
+	}
+	if envMap["SPLUNK_CONFIG_SOURCES"] == "" {
+		t.Fatalf("expected SPLUNK_CONFIG_SOURCES in init env")
+	}
+	if envMap["SPLUNK_DEPLOYER_URL"] != "splunk-stack1-deployer-service" {
+		t.Fatalf("expected SPLUNK_DEPLOYER_URL in init env, got %q", envMap["SPLUNK_DEPLOYER_URL"])
+	}
+	if envMap["SPLUNK_CLUSTER_MASTER_URL"] != "splunk-stack1-cluster-manager-service" {
+		t.Fatalf("expected SPLUNK_CLUSTER_MASTER_URL in init env, got %q", envMap["SPLUNK_CLUSTER_MASTER_URL"])
+	}
+}

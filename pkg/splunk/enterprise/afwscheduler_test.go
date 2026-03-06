@@ -16,6 +16,7 @@ package enterprise
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -2660,7 +2661,7 @@ func TestSetLivenessProbeLevelForSHC(t *testing.T) {
 
 	podExecCommands := []string{
 		"mkdir -p /tmp/splunk_operator_k8s/probes/; echo \"export K8_OPERATOR_LIVENESS_LEVEL=1\" > /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh",
-		"[[ -f /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh ]] && > /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh",
+		"[ -f /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh ] && > /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh",
 	}
 
 	mockPodExecReturnContexts := []*spltest.MockPodExecReturnContext{
@@ -2743,7 +2744,7 @@ func TestSetLivenessProbeLevelForIDXC(t *testing.T) {
 
 	podExecCommands := []string{
 		"mkdir -p /tmp/splunk_operator_k8s/probes/; echo \"export K8_OPERATOR_LIVENESS_LEVEL=1\" > /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh",
-		"[[ -f /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh ]] && > /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh",
+		"[ -f /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh ] && > /tmp/splunk_operator_k8s/probes/k8_liveness_driver.sh",
 	}
 
 	mockPodExecReturnContexts := []*spltest.MockPodExecReturnContext{
@@ -4617,6 +4618,158 @@ func TestAddTelAppCManager(t *testing.T) {
 	}
 	// Negative testing
 	addTelApp(ctx, mockPodExecClient, 2, &crNew)
+}
+
+func TestAddTelAppUsesSidecarInMultiContainerMode(t *testing.T) {
+	ctx := context.TODO()
+	t.Setenv("SPLUNK_POD_ARCH", "multi-container")
+	t.Setenv("CLUSTER_DOMAIN", "cluster.local")
+
+	originalEnsure := postSidecarTelemetryEnsure
+	defer func() { postSidecarTelemetryEnsure = originalEnsure }()
+
+	type ensureCall struct {
+		Endpoint string
+		Scope    string
+		AppName  string
+	}
+	calls := make([]ensureCall, 0, 2)
+	postSidecarTelemetryEnsure = func(_ context.Context, endpoint string, body []byte) error {
+		var payload map[string]string
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return err
+		}
+		calls = append(calls, ensureCall{
+			Endpoint: endpoint,
+			Scope:    payload["scope"],
+			AppName:  payload["app_name"],
+		})
+		return nil
+	}
+
+	cmCr := &enterpriseApi.ClusterManager{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cm1",
+			Namespace: "test",
+		},
+		TypeMeta: metav1.TypeMeta{
+			Kind: "ClusterManager",
+		},
+	}
+
+	shcCr := &enterpriseApi.SearchHeadCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "shc1",
+			Namespace: "test",
+		},
+		TypeMeta: metav1.TypeMeta{
+			Kind: "SearchHeadCluster",
+		},
+	}
+
+	mockPodExecClient := &spltest.MockPodExecClient{Cr: cmCr}
+	if err := addTelApp(ctx, mockPodExecClient, 1, cmCr); err != nil {
+		t.Fatalf("expected sidecar telemetry ensure for cluster manager, got error: %v", err)
+	}
+
+	mockPodExecClient.Cr = shcCr
+	if err := addTelApp(ctx, mockPodExecClient, 1, shcCr); err != nil {
+		t.Fatalf("expected sidecar telemetry ensure for shc deployer, got error: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 sidecar ensure calls, got %d", len(calls))
+	}
+
+	if calls[0].Scope != "local" || calls[0].AppName != telAppNameStr {
+		t.Fatalf("unexpected first payload: %+v", calls[0])
+	}
+	if calls[1].Scope != "shc" || calls[1].AppName != telAppNameStr {
+		t.Fatalf("unexpected second payload: %+v", calls[1])
+	}
+
+	expectedCM := "http://splunk-cm1-cluster-manager-0.splunk-cm1-cluster-manager-headless.test.svc.cluster.local:8080/api/v1/admin/telemetry/app/ensure"
+	if calls[0].Endpoint != expectedCM {
+		t.Fatalf("unexpected cluster manager endpoint: got=%q want=%q", calls[0].Endpoint, expectedCM)
+	}
+
+	expectedSHC := "http://splunk-shc1-deployer-0.splunk-shc1-deployer-headless.test.svc.cluster.local:8080/api/v1/admin/telemetry/app/ensure"
+	if calls[1].Endpoint != expectedSHC {
+		t.Fatalf("unexpected shc endpoint: got=%q want=%q", calls[1].Endpoint, expectedSHC)
+	}
+}
+
+func TestRunShcPlaybookUsesSidecarInMultiContainerMode(t *testing.T) {
+	ctx := context.TODO()
+	t.Setenv("SPLUNK_POD_ARCH", "multi-container")
+	t.Setenv("CLUSTER_DOMAIN", "cluster.local")
+
+	originalApply := postSidecarSHCBundleApply
+	defer func() { postSidecarSHCBundleApply = originalApply }()
+
+	var endpoints []string
+	postSidecarSHCBundleApply = func(_ context.Context, endpoint string) error {
+		endpoints = append(endpoints, endpoint)
+		return nil
+	}
+
+	c := spltest.NewMockClient()
+	cr := &enterpriseApi.SearchHeadCluster{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "SearchHeadCluster",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "stack1",
+			Namespace: "test",
+		},
+	}
+	cr.Status.Phase = enterpriseApi.PhaseReady
+
+	appDeployContext := enterpriseApi.AppDeploymentContext{
+		AppsSrcDeployStatus: map[string]enterpriseApi.AppSrcDeployInfo{},
+		BundlePushStatus: enterpriseApi.BundlePushTracker{
+			BundlePushStage: enterpriseApi.BundlePushPending,
+		},
+	}
+	appDeployContext.AppsSrcDeployStatus["appSrc1"] = enterpriseApi.AppSrcDeployInfo{
+		AppDeploymentInfoList: []enterpriseApi.AppDeploymentInfo{
+			{
+				AppName: "app1",
+				PhaseInfo: enterpriseApi.PhaseInfo{
+					Phase:  enterpriseApi.PhasePodCopy,
+					Status: enterpriseApi.AppPkgPodCopyComplete,
+				},
+				ObjectHash: "abcd1111",
+				Size:       10,
+			},
+		},
+	}
+	afwPipeline := initAppInstallPipeline(ctx, &appDeployContext, c, cr)
+
+	targetPodName := getApplicablePodNameForAppFramework(cr, 0)
+	mockPodExecClient := &spltest.MockPodExecClient{Cr: cr}
+	playbookContext := getClusterScopePlaybookContext(
+		ctx, c, cr, afwPipeline, targetPodName, cr.GetObjectKind().GroupVersionKind().Kind, mockPodExecClient,
+	)
+	if playbookContext == nil {
+		t.Fatalf("expected SHC playbook context")
+	}
+
+	if err := playbookContext.runPlaybook(ctx); err != nil {
+		t.Fatalf("runPlaybook should succeed via sidecar in multi-container mode: %v", err)
+	}
+
+	if got := getBundlePushState(afwPipeline); got != enterpriseApi.BundlePushComplete {
+		t.Fatalf("expected bundle push complete, got %s", bundlePushStateAsStr(ctx, got))
+	}
+	if len(endpoints) != 1 {
+		t.Fatalf("expected one sidecar SHC bundle call, got %d", len(endpoints))
+	}
+
+	wantEndpoint := "http://splunk-stack1-deployer-0.splunk-stack1-deployer-headless.test.svc.cluster.local:8080/api/v1/admin/bundles/shc/apply"
+	if endpoints[0] != wantEndpoint {
+		t.Fatalf("unexpected sidecar endpoint: got=%q want=%q", endpoints[0], wantEndpoint)
+	}
 }
 
 func TestIsAppAlreadyInstalled(t *testing.T) {

@@ -1593,14 +1593,15 @@ func updateManualAppUpdateConfigMapLocked(ctx context.Context, client splcommon.
 	reqLogger := log.FromContext(ctx)
 	scopedLog := reqLogger.WithName("updateManualAppUpdateConfigMap").WithValues("name", cr.GetName(), "namespace", cr.GetNamespace())
 	var status string
+	const maxConfigMapUpdateRetries = 5
 
 	configMapName := GetSplunkManualAppUpdateConfigMapName(cr.GetNamespace())
 	namespacedName := types.NamespacedName{Namespace: cr.GetNamespace(), Name: configMapName}
 
-	{
-		mux := getResourceMutex(configMapName)
-		mux.Lock()
-		defer mux.Unlock()
+	mux := getResourceMutex(configMapName)
+	mux.Lock()
+	defer mux.Unlock()
+	for attempt := 1; attempt <= maxConfigMapUpdateRetries; attempt++ {
 		configMap, err := splctrl.GetConfigMap(ctx, client, namespacedName)
 		if err != nil {
 			scopedLog.Error(err, "Unable to get configMap", "name", namespacedName.Name)
@@ -1633,13 +1634,18 @@ func updateManualAppUpdateConfigMapLocked(ctx context.Context, client splcommon.
 		configMap.Data[kind] = configMapData
 
 		err = splutil.UpdateResource(ctx, client, configMap)
-		if err != nil {
+		if err == nil {
+			return nil
+		}
+		if !k8serrors.IsConflict(err) {
 			scopedLog.Error(err, "Could not update the configMap", "name", namespacedName.Name)
 			return err
 		}
+
+		scopedLog.Info("Conflict while updating the configMap, retrying with latest version", "name", namespacedName.Name, "attempt", attempt, "maxAttempts", maxConfigMapUpdateRetries)
 	}
 
-	return nil
+	return fmt.Errorf("timed out updating configMap %s after %d conflict retries", namespacedName.Name, maxConfigMapUpdateRetries)
 }
 
 func updateCrSpecificManualAppUpdateConfigMap(ctx context.Context, client splcommon.ControllerClient, cr splcommon.MetaObject, appStatusContext *enterpriseApi.AppDeploymentContext, kind string, turnOffManualChecking bool) error {
@@ -2506,7 +2512,7 @@ func setProbeLevelOnSplunkPod(ctx context.Context, podExecClient splutil.PodExec
 	scopedLog := reqLogger.WithName("setProbeLevelOnSplunkPod").WithValues("podName", podExecClient.GetTargetPodName(), "probeLevel", probeLevel)
 	switch probeLevel {
 	case livenessProbeLevelDefault:
-		command = fmt.Sprintf("[[ -f %s ]] && > %s", GetLivenessDriverFilePath(), GetLivenessDriverFilePath())
+		command = fmt.Sprintf("[ -f %s ] && > %s", GetLivenessDriverFilePath(), GetLivenessDriverFilePath())
 
 	case livenessProbeLevelOne:
 		command = fmt.Sprintf("mkdir -p %s; echo \"export %s=%d\" > %s", GetLivenessDriverFileDir(), livenessProbeLevelName, probeLevel, GetLivenessDriverFilePath())

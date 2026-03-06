@@ -475,6 +475,44 @@ func TestGetMonitoringConsoleStatefulSet(t *testing.T) {
 	cr.ObjectMeta.Labels["app.kubernetes.io/test-extra-label"] = "test-extra-label-value"
 	test(loadFixture(t, "statefulset_stack1_monitoring_console_with_service_account_1.json"))
 }
+
+func TestGetMonitoringConsoleConfigDataHash(t *testing.T) {
+	if got := getMonitoringConsoleConfigDataHash(nil); got != "" {
+		t.Fatalf("expected empty hash for nil config map data, got %q", got)
+	}
+
+	if got := getMonitoringConsoleConfigDataHash(map[string]string{}); got != "" {
+		t.Fatalf("expected empty hash for empty config map data, got %q", got)
+	}
+
+	left := map[string]string{
+		"SPLUNK_CLUSTER_MANAGER_URL": "https://cm:8089",
+		"SPLUNK_INDEXER_URL":         "idx-0,idx-1",
+	}
+	right := map[string]string{
+		"SPLUNK_INDEXER_URL":         "idx-0,idx-1",
+		"SPLUNK_CLUSTER_MANAGER_URL": "https://cm:8089",
+	}
+
+	leftHash := getMonitoringConsoleConfigDataHash(left)
+	rightHash := getMonitoringConsoleConfigDataHash(right)
+	if leftHash == "" {
+		t.Fatalf("expected non-empty hash for non-empty config map data")
+	}
+	if leftHash != rightHash {
+		t.Fatalf("expected deterministic hash irrespective of key order, left=%s right=%s", leftHash, rightHash)
+	}
+
+	changed := map[string]string{
+		"SPLUNK_CLUSTER_MANAGER_URL": "https://cm:8089",
+		"SPLUNK_INDEXER_URL":         "idx-0,idx-2",
+	}
+	changedHash := getMonitoringConsoleConfigDataHash(changed)
+	if changedHash == leftHash {
+		t.Fatalf("expected hash change when config map data changes")
+	}
+}
+
 func TestMonitoringConsoleSpecNotCreatedWithoutGeneralTerms(t *testing.T) {
 	// Unset the SPLUNK_GENERAL_TERMS environment variable
 	os.Unsetenv("SPLUNK_GENERAL_TERMS")

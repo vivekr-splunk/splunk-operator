@@ -124,6 +124,12 @@ func ApplyLicenseMaster(ctx context.Context, client splcommon.ControllerClient, 
 		return result, err
 	}
 
+	// create or update a headless service
+	err = splctrl.ApplyService(ctx, client, getSplunkService(ctx, cr, &cr.Spec.CommonSplunkSpec, SplunkLicenseMaster, true))
+	if err != nil {
+		return result, err
+	}
+
 	// create or update a service
 	err = splctrl.ApplyService(ctx, client, getSplunkService(ctx, cr, &cr.Spec.CommonSplunkSpec, SplunkLicenseMaster, false))
 	if err != nil {

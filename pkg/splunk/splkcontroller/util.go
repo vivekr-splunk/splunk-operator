@@ -30,6 +30,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const podTemplateImageTagAnnotation = "splunk/image-tag"
+
+func filterPodTemplateAnnotations(annotations map[string]string) map[string]string {
+	if len(annotations) == 0 {
+		return nil
+	}
+
+	filtered := make(map[string]string, len(annotations))
+	for k, v := range annotations {
+		if k == podTemplateImageTagAnnotation {
+			continue
+		}
+		filtered[k] = v
+	}
+
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
 // kubernetes logger used by splunk.reconcile package
 //var log = logf.Log.WithName("splunk.reconcile")
 
@@ -57,9 +78,12 @@ func MergePodMetaUpdates(ctx context.Context, current *metav1.ObjectMeta, revise
 	scopedLog := reqLogger.WithName("MergePodMetaUpdates").WithValues("name", name)
 	result := false
 
+	currentAnnotations := filterPodTemplateAnnotations(current.Annotations)
+	revisedAnnotations := filterPodTemplateAnnotations(revised.Annotations)
+
 	// check Annotations
-	if !reflect.DeepEqual(current.Annotations, revised.Annotations) {
-		scopedLog.Info("Container Annotations differ", "current", current.Annotations, "revised", revised.Annotations)
+	if !reflect.DeepEqual(currentAnnotations, revisedAnnotations) {
+		scopedLog.Info("Container Annotations differ", "current", currentAnnotations, "revised", revisedAnnotations)
 		current.Annotations = revised.Annotations
 		result = true
 	}
@@ -290,11 +314,21 @@ func MergeServiceSpecUpdates(ctx context.Context, current *corev1.ServiceSpec, r
 	result := false
 
 	// check service Type
-	if current.Type != revised.Type {
+	desiredType := revised.Type
+	if desiredType == "" {
+		// Kubernetes defaults empty Service type to ClusterIP. Treat it as explicit
+		// ClusterIP to avoid perpetual update loops (ClusterIP <-> empty).
+		desiredType = corev1.ServiceTypeClusterIP
+	}
+	currentType := current.Type
+	if currentType == "" {
+		currentType = corev1.ServiceTypeClusterIP
+	}
+	if currentType != desiredType {
 		scopedLog.Info("Service Type differs",
-			"current", current.Type,
-			"revised", revised.Type)
-		current.Type = revised.Type
+			"current", currentType,
+			"revised", desiredType)
+		current.Type = desiredType
 		result = true
 	}
 

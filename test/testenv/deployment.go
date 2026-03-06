@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -48,6 +49,157 @@ type Deployment struct {
 	testenv      *TestCaseEnv
 	cleanupFuncs []cleanupFunc
 	testTimeout  time.Duration
+}
+
+const (
+	topologyZoneLabel       = "topology.kubernetes.io/zone"
+	legacyTopologyZoneLabel = "failure-domain.beta.kubernetes.io/zone"
+)
+
+func multisiteSiteNames(siteCount int) []string {
+	siteNames := make([]string, 0, siteCount)
+	for site := 1; site <= siteCount; site++ {
+		siteNames = append(siteNames, fmt.Sprintf("site%d", site))
+	}
+	return siteNames
+}
+
+func multisiteManagerDefaults(siteCount int) string {
+	return fmt.Sprintf(`splunk:
+  multisite_master: localhost
+  all_sites: %s
+  site: site1
+  multisite_replication_factor_origin: 1
+  multisite_replication_factor_total: 2
+  multisite_search_factor_origin: 1
+  multisite_search_factor_total: 2
+  idxc:
+    search_factor: 2
+    replication_factor: 2
+`, strings.Join(multisiteSiteNames(siteCount), ","))
+}
+
+func multisiteMemberDefaults(name, managerRole, site string) string {
+	return fmt.Sprintf(`splunk:
+  multisite_master: splunk-%s-%s-service
+  site: %s
+`, name, managerRole, site)
+}
+
+func zoneNodeAffinity(zone string) corev1.Affinity {
+	return corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{
+							{
+								Key:      topologyZoneLabel,
+								Operator: corev1.NodeSelectorOpIn,
+								Values:   []string{zone},
+							},
+						},
+					},
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{
+							{
+								Key:      legacyTopologyZoneLabel,
+								Operator: corev1.NodeSelectorOpIn,
+								Values:   []string{zone},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func isNodeReady(node *corev1.Node) bool {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func (d *Deployment) getReadyNodeZones(ctx context.Context) ([]string, error) {
+	nodeList := &corev1.NodeList{}
+	if err := d.testenv.GetKubeClient().List(ctx, nodeList); err != nil {
+		return nil, err
+	}
+
+	zoneSet := make(map[string]struct{})
+	for i := range nodeList.Items {
+		node := &nodeList.Items[i]
+		if node.Spec.Unschedulable || !isNodeReady(node) {
+			continue
+		}
+
+		zone := strings.TrimSpace(node.Labels[topologyZoneLabel])
+		if zone == "" {
+			zone = strings.TrimSpace(node.Labels[legacyTopologyZoneLabel])
+		}
+		if zone == "" {
+			continue
+		}
+		zoneSet[zone] = struct{}{}
+	}
+
+	zones := make([]string, 0, len(zoneSet))
+	for zone := range zoneSet {
+		zones = append(zones, zone)
+	}
+	sort.Strings(zones)
+
+	if len(zones) == 0 {
+		return nil, fmt.Errorf("no ready schedulable nodes found with zone label %q or %q", topologyZoneLabel, legacyTopologyZoneLabel)
+	}
+
+	return zones, nil
+}
+
+func (d *Deployment) getMultisiteSiteZoneAssignments(ctx context.Context, siteCount int) (map[string]string, error) {
+	if siteCount <= 0 {
+		return nil, fmt.Errorf("siteCount must be greater than zero")
+	}
+
+	siteNames := multisiteSiteNames(siteCount)
+	zones, err := d.getReadyNodeZones(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(zones) < siteCount {
+		return nil, fmt.Errorf("multisite deployment requires %d unique node availability zones, found %d (%s)", siteCount, len(zones), strings.Join(zones, ","))
+	}
+
+	assignments := make(map[string]string, siteCount)
+	for idx, siteName := range siteNames {
+		assignments[siteName] = zones[idx]
+	}
+
+	d.testenv.Log.Info("multisite site to zone assignment", "assignment", assignments)
+	return assignments, nil
+}
+
+func (d *Deployment) deployMultisiteIndexerSites(ctx context.Context, name, licenseManagerName string, indexerReplicas, siteCount int, clusterManagerRef, managerRole string) (*enterpriseApi.IndexerCluster, error) {
+	siteZones, err := d.getMultisiteSiteZoneAssignments(ctx, siteCount)
+	if err != nil {
+		return nil, err
+	}
+
+	var idxc *enterpriseApi.IndexerCluster
+	for _, siteName := range multisiteSiteNames(siteCount) {
+		siteDefaults := multisiteMemberDefaults(name, managerRole, siteName)
+		idxc, err = d.DeployIndexerCluster(ctx, name+"-"+siteName, licenseManagerName, indexerReplicas, clusterManagerRef, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "", siteZones[siteName])
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return idxc, nil
 }
 
 // GetName returns this deployment name
@@ -261,7 +413,7 @@ func (d *Deployment) PodExecCommand(ctx context.Context, podName string, cmd []s
 	stdinReader := strings.NewReader(stdin)
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)
-	err = exec.Stream(remotecommand.StreamOptions{
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdin:  stdinReader,
 		Stdout: stdout,
 		Stderr: stderr,
@@ -333,7 +485,7 @@ func (d *Deployment) OperatorPodExecCommand(ctx context.Context, podName string,
 	stdinReader := strings.NewReader(stdin)
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)
-	err = exec.Stream(remotecommand.StreamOptions{
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdin:  stdinReader,
 		Stdout: stdout,
 		Stderr: stderr,
@@ -449,9 +601,13 @@ func (d *Deployment) DeployClusterMasterWithSmartStoreIndexes(ctx context.Contex
 }
 
 // DeployIndexerCluster deploys the indexer cluster
-func (d *Deployment) DeployIndexerCluster(ctx context.Context, name, LicenseManagerName string, count int, clusterManagerRef string, ansibleConfig string, queue, os corev1.ObjectReference, serviceAccountName string) (*enterpriseApi.IndexerCluster, error) {
+func (d *Deployment) DeployIndexerCluster(ctx context.Context, name, LicenseManagerName string, count int, clusterManagerRef string, ansibleConfig string, queue, os corev1.ObjectReference, serviceAccountName string, zone ...string) (*enterpriseApi.IndexerCluster, error) {
 	d.testenv.Log.Info("Deploying indexer cluster", "name", name, "CM", clusterManagerRef)
 	indexer := newIndexerCluster(name, d.testenv.namespace, LicenseManagerName, count, clusterManagerRef, ansibleConfig, d.testenv.splunkImage, queue, os, serviceAccountName)
+	if len(zone) > 0 && strings.TrimSpace(zone[0]) != "" {
+		indexer.Spec.Affinity = zoneNodeAffinity(strings.TrimSpace(zone[0]))
+		d.testenv.Log.Info("applied zone node affinity for indexer cluster", "name", name, "zone", strings.TrimSpace(zone[0]))
+	}
 	pdata, _ := json.Marshal(indexer)
 	d.testenv.Log.Info("indexer cluster spec", "cr", string(pdata))
 	deployed, err := d.deployCR(ctx, name, indexer)
@@ -815,18 +971,7 @@ func (d *Deployment) DeployMultisiteClusterMasterWithSearchHead(ctx context.Cont
 	}
 
 	// Deploy the cluster-manager
-	defaults := `splunk:
-  multisite_master: localhost
-  all_sites: site1,site2,site3
-  site: site1
-  multisite_replication_factor_origin: 1
-  multisite_replication_factor_total: 2
-  multisite_search_factor_origin: 1
-  multisite_search_factor_total: 2
-  idxc:
-    search_factor: 2
-    replication_factor: 2
-`
+	defaults := multisiteManagerDefaults(siteCount)
 	_, err := d.DeployClusterMaster(ctx, name, LicenseMaster, defaults, mcRef)
 	if err != nil {
 		return err
@@ -835,23 +980,12 @@ func (d *Deployment) DeployMultisiteClusterMasterWithSearchHead(ctx context.Cont
 	ClusterMasterReady(ctx, d, d.testenv)
 
 	// Deploy indexer sites
-	for site := 1; site <= siteCount; site++ {
-		siteName := fmt.Sprintf("site%d", site)
-		siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: %s
-`, name, "cluster-master", siteName)
-		_, err := d.DeployIndexerCluster(ctx, name+"-"+siteName, LicenseMaster, indexerReplicas, name, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "")
-		if err != nil {
-			return err
-		}
-		//IndexersReady(ctx, d, d.testenv, site)
+	_, err = d.deployMultisiteIndexerSites(ctx, name, LicenseMaster, indexerReplicas, siteCount, name, "cluster-master")
+	if err != nil {
+		return err
 	}
 
-	siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: site0
-`, name, "cluster-master")
+	siteDefaults := multisiteMemberDefaults(name, "cluster-master", "site0")
 	_, err = d.DeploySearchHeadCluster(ctx, name+"-shc", name, LicenseMaster, siteDefaults, mcRef)
 	if err != nil {
 		return err
@@ -887,18 +1021,7 @@ func (d *Deployment) DeployMultisiteClusterWithSearchHead(ctx context.Context, n
 	}
 
 	// Deploy the cluster-manager
-	defaults := `splunk:
-  multisite_master: localhost
-  all_sites: site1,site2,site3
-  site: site1
-  multisite_replication_factor_origin: 1
-  multisite_replication_factor_total: 2
-  multisite_search_factor_origin: 1
-  multisite_search_factor_total: 2
-  idxc:
-    search_factor: 2
-    replication_factor: 2
-`
+	defaults := multisiteManagerDefaults(siteCount)
 	_, err := d.DeployClusterManager(ctx, name, LicenseManager, defaults, mcRef)
 	if err != nil {
 		return err
@@ -907,23 +1030,12 @@ func (d *Deployment) DeployMultisiteClusterWithSearchHead(ctx context.Context, n
 	ClusterManagerReady(ctx, d, d.testenv)
 
 	// Deploy indexer sites
-	for site := 1; site <= siteCount; site++ {
-		siteName := fmt.Sprintf("site%d", site)
-		siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: %s
-`, name, "cluster-manager", siteName)
-		_, err := d.DeployIndexerCluster(ctx, name+"-"+siteName, LicenseManager, indexerReplicas, name, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "")
-		if err != nil {
-			return err
-		}
-		//IndexersReady(ctx, d, d.testenv, site)
+	_, err = d.deployMultisiteIndexerSites(ctx, name, LicenseManager, indexerReplicas, siteCount, name, "cluster-manager")
+	if err != nil {
+		return err
 	}
 
-	siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: site0
-`, name, "cluster-manager")
+	siteDefaults := multisiteMemberDefaults(name, "cluster-manager", "site0")
 	_, err = d.DeploySearchHeadCluster(ctx, name+"-shc", name, LicenseManager, siteDefaults, mcRef)
 	if err != nil {
 		return err
@@ -950,34 +1062,16 @@ func (d *Deployment) DeployMultisiteCluster(ctx context.Context, name string, in
 	}
 
 	// Deploy the cluster-manager
-	defaults := `splunk:
-  multisite_master: localhost
-  all_sites: site1,site2,site3
-  site: site1
-  multisite_replication_factor_origin: 1
-  multisite_replication_factor_total: 2
-  multisite_search_factor_origin: 1
-  multisite_search_factor_total: 2
-  idxc:
-    search_factor: 2
-    replication_factor: 2
-`
+	defaults := multisiteManagerDefaults(siteCount)
 	_, err := d.DeployClusterManager(ctx, name, LicenseManager, defaults, mcRef)
 	if err != nil {
 		return err
 	}
 
 	// Deploy indexer sites
-	for site := 1; site <= siteCount; site++ {
-		siteName := fmt.Sprintf("site%d", site)
-		siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: %s
-`, name, "cluster-manager", siteName)
-		_, err := d.DeployIndexerCluster(ctx, name+"-"+siteName, LicenseManager, indexerReplicas, name, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "")
-		if err != nil {
-			return err
-		}
+	_, err = d.deployMultisiteIndexerSites(ctx, name, LicenseManager, indexerReplicas, siteCount, name, "cluster-manager")
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -1086,40 +1180,19 @@ func (d *Deployment) DeployMultisiteClusterWithSearchHeadAndIndexes(ctx context.
 	}
 
 	// Deploy the cluster-manager
-	defaults := `splunk:
-  multisite_master: localhost
-  all_sites: site1,site2,site3
-  site: site1
-  multisite_replication_factor_origin: 1
-  multisite_replication_factor_total: 2
-  multisite_search_factor_origin: 1
-  multisite_search_factor_total: 2
-  idxc:
-    search_factor: 2
-    replication_factor: 2
-`
+	defaults := multisiteManagerDefaults(siteCount)
 	_, err := d.DeployClusterManagerWithSmartStoreIndexes(ctx, name, LicenseManager, defaults, smartStoreSpec)
 	if err != nil {
 		return err
 	}
 
 	// Deploy indexer sites
-	for site := 1; site <= siteCount; site++ {
-		siteName := fmt.Sprintf("site%d", site)
-		siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: %s
-`, name, "cluster-manager", siteName)
-		_, err := d.DeployIndexerCluster(ctx, name+"-"+siteName, LicenseManager, indexerReplicas, name, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "")
-		if err != nil {
-			return err
-		}
+	_, err = d.deployMultisiteIndexerSites(ctx, name, LicenseManager, indexerReplicas, siteCount, name, "cluster-manager")
+	if err != nil {
+		return err
 	}
 
-	siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: site0
-`, name, "cluster-manager")
+	siteDefaults := multisiteMemberDefaults(name, "cluster-manager", "site0")
 	_, err = d.DeploySearchHeadCluster(ctx, name+"-shc", name, LicenseManager, siteDefaults, "")
 	return err
 }
@@ -1141,40 +1214,19 @@ func (d *Deployment) DeployMultisiteClusterMasterWithSearchHeadAndIndexes(ctx co
 	}
 
 	// Deploy the cluster-manager
-	defaults := `splunk:
-  multisite_master: localhost
-  all_sites: site1,site2,site3
-  site: site1
-  multisite_replication_factor_origin: 1
-  multisite_replication_factor_total: 2
-  multisite_search_factor_origin: 1
-  multisite_search_factor_total: 2
-  idxc:
-    search_factor: 2
-    replication_factor: 2
-`
+	defaults := multisiteManagerDefaults(siteCount)
 	_, err := d.DeployClusterMasterWithSmartStoreIndexes(ctx, name, LicenseManager, defaults, smartStoreSpec)
 	if err != nil {
 		return err
 	}
 
 	// Deploy indexer sites
-	for site := 1; site <= siteCount; site++ {
-		siteName := fmt.Sprintf("site%d", site)
-		siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: %s
-`, name, "cluster-master", siteName)
-		_, err := d.DeployIndexerCluster(ctx, name+"-"+siteName, LicenseManager, indexerReplicas, name, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "")
-		if err != nil {
-			return err
-		}
+	_, err = d.deployMultisiteIndexerSites(ctx, name, LicenseManager, indexerReplicas, siteCount, name, "cluster-master")
+	if err != nil {
+		return err
 	}
 
-	siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: site0
-`, name, "cluster-master")
+	siteDefaults := multisiteMemberDefaults(name, "cluster-master", "site0")
 	_, err = d.DeploySearchHeadCluster(ctx, name+"-shc", name, LicenseManager, siteDefaults, "")
 	return err
 }
@@ -1404,18 +1456,7 @@ func (d *Deployment) DeployMultisiteClusterWithSearchHeadAndAppFramework(ctx con
 	}
 
 	// Deploy the cluster-manager
-	defaults := `splunk:
-  multisite_master: localhost
-  all_sites: site1,site2,site3
-  site: site1
-  multisite_replication_factor_origin: 1
-  multisite_replication_factor_total: 2
-  multisite_search_factor_origin: 1
-  multisite_search_factor_total: 2
-  idxc:
-    search_factor: 2
-    replication_factor: 2
-`
+	defaults := multisiteManagerDefaults(siteCount)
 
 	// Cluster Manager Spec
 	cmSpec := enterpriseApi.ClusterManagerSpec{
@@ -1442,22 +1483,12 @@ func (d *Deployment) DeployMultisiteClusterWithSearchHeadAndAppFramework(ctx con
 	}
 
 	// Deploy indexer sites
-	for site := 1; site <= siteCount; site++ {
-		siteName := fmt.Sprintf("site%d", site)
-		siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: %s
-`, name, "cluster-manager", siteName)
-		idxc, err := d.DeployIndexerCluster(ctx, name+"-"+siteName, licenseManager, indexerReplicas, name, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "")
-		if err != nil {
-			return cm, idxc, sh, err
-		}
+	idxc, err = d.deployMultisiteIndexerSites(ctx, name, licenseManager, indexerReplicas, siteCount, name, "cluster-manager")
+	if err != nil {
+		return cm, idxc, sh, err
 	}
 
-	siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: site0
-`, name, "cluster-manager")
+	siteDefaults := multisiteMemberDefaults(name, "cluster-manager", "site0")
 	// Deploy the SH cluster
 	shSpec := enterpriseApi.SearchHeadClusterSpec{
 		CommonSplunkSpec: enterpriseApi.CommonSplunkSpec{
@@ -1508,18 +1539,7 @@ func (d *Deployment) DeployMultisiteClusterMasterWithSearchHeadAndAppFramework(c
 	}
 
 	// Deploy the cluster-manager
-	defaults := `splunk:
-  multisite_master: localhost
-  all_sites: site1,site2,site3
-  site: site1
-  multisite_replication_factor_origin: 1
-  multisite_replication_factor_total: 2
-  multisite_search_factor_origin: 1
-  multisite_search_factor_total: 2
-  idxc:
-    search_factor: 2
-    replication_factor: 2
-`
+	defaults := multisiteManagerDefaults(siteCount)
 
 	// Cluster Manager Spec
 	cmSpec := enterpriseApiV3.ClusterMasterSpec{
@@ -1546,22 +1566,12 @@ func (d *Deployment) DeployMultisiteClusterMasterWithSearchHeadAndAppFramework(c
 	}
 
 	// Deploy indexer sites
-	for site := 1; site <= siteCount; site++ {
-		siteName := fmt.Sprintf("site%d", site)
-		siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: %s
-`, name, "cluster-master", siteName)
-		idxc, err := d.DeployIndexerCluster(ctx, name+"-"+siteName, licenseMaster, indexerReplicas, name, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "")
-		if err != nil {
-			return cm, idxc, sh, err
-		}
+	idxc, err = d.deployMultisiteIndexerSites(ctx, name, licenseMaster, indexerReplicas, siteCount, name, "cluster-master")
+	if err != nil {
+		return cm, idxc, sh, err
 	}
 
-	siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: site0
-`, name, "cluster-master")
+	siteDefaults := multisiteMemberDefaults(name, "cluster-master", "site0")
 	// Deploy the SH cluster
 	shSpec := enterpriseApi.SearchHeadClusterSpec{
 		CommonSplunkSpec: enterpriseApi.CommonSplunkSpec{
@@ -1756,18 +1766,7 @@ func (d *Deployment) DeployMultisiteClusterWithMonitoringConsole(ctx context.Con
 	}
 
 	// Deploy the cluster-manager
-	defaults := `splunk:
-  multisite_master: localhost
-  all_sites: site1,site2,site3
-  site: site1
-  multisite_replication_factor_origin: 1
-  multisite_replication_factor_total: 2
-  multisite_search_factor_origin: 1
-  multisite_search_factor_total: 2
-  idxc:
-    search_factor: 2
-    replication_factor: 2
-`
+	defaults := multisiteManagerDefaults(siteCount)
 
 	// Cluster Manager Spec
 	cmSpec := enterpriseApi.ClusterManagerSpec{
@@ -1793,22 +1792,12 @@ func (d *Deployment) DeployMultisiteClusterWithMonitoringConsole(ctx context.Con
 	}
 
 	// Deploy indexer sites
-	for site := 1; site <= siteCount; site++ {
-		siteName := fmt.Sprintf("site%d", site)
-		siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: %s
-`, name, "cluster-manager", siteName)
-		_, err := d.DeployIndexerCluster(ctx, name+"-"+siteName, licenseManager, indexerReplicas, name, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "")
-		if err != nil {
-			return err
-		}
+	_, err = d.deployMultisiteIndexerSites(ctx, name, licenseManager, indexerReplicas, siteCount, name, "cluster-manager")
+	if err != nil {
+		return err
 	}
 
-	siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: site0
-`, name, "cluster-manager")
+	siteDefaults := multisiteMemberDefaults(name, "cluster-manager", "site0")
 	// Deploy the SH cluster
 	shSpec := enterpriseApi.SearchHeadClusterSpec{
 		CommonSplunkSpec: enterpriseApi.CommonSplunkSpec{
@@ -1856,18 +1845,7 @@ func (d *Deployment) DeployMultisiteClusterMasterWithMonitoringConsole(ctx conte
 	}
 
 	// Deploy the cluster-manager
-	defaults := `splunk:
-  multisite_master: localhost
-  all_sites: site1,site2,site3
-  site: site1
-  multisite_replication_factor_origin: 1
-  multisite_replication_factor_total: 2
-  multisite_search_factor_origin: 1
-  multisite_search_factor_total: 2
-  idxc:
-    search_factor: 2
-    replication_factor: 2
-`
+	defaults := multisiteManagerDefaults(siteCount)
 
 	// Cluster Master Spec
 	cmSpec := enterpriseApiV3.ClusterMasterSpec{
@@ -1893,22 +1871,12 @@ func (d *Deployment) DeployMultisiteClusterMasterWithMonitoringConsole(ctx conte
 	}
 
 	// Deploy indexer sites
-	for site := 1; site <= siteCount; site++ {
-		siteName := fmt.Sprintf("site%d", site)
-		siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: %s
-`, name, "cluster-master", siteName)
-		_, err := d.DeployIndexerCluster(ctx, name+"-"+siteName, licenseMaster, indexerReplicas, name, siteDefaults, corev1.ObjectReference{}, corev1.ObjectReference{}, "")
-		if err != nil {
-			return err
-		}
+	_, err = d.deployMultisiteIndexerSites(ctx, name, licenseMaster, indexerReplicas, siteCount, name, "cluster-master")
+	if err != nil {
+		return err
 	}
 
-	siteDefaults := fmt.Sprintf(`splunk:
-  multisite_master: splunk-%s-%s-service
-  site: site0
-`, name, "cluster-master")
+	siteDefaults := multisiteMemberDefaults(name, "cluster-master", "site0")
 	// Deploy the SH cluster
 	shSpec := enterpriseApi.SearchHeadClusterSpec{
 		CommonSplunkSpec: enterpriseApi.CommonSplunkSpec{

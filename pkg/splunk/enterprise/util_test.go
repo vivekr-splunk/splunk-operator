@@ -29,12 +29,14 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	pkgruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -1196,9 +1198,9 @@ func TestCreateAppDownloadDir(t *testing.T) {
 		t.Errorf("Didn't expect error")
 	}
 
-	err = createAppDownloadDir(ctx, "/xyzzz.txt")
+	err = createAppDownloadDir(ctx, "/sys/splunk-op-app-download-test")
 	if err == nil {
-		t.Errorf("Expected error")
+		t.Errorf("Expected error when creating app download dir on read-only filesystem")
 	}
 }
 
@@ -1330,6 +1332,22 @@ func TestGetNextRequeueTime(t *testing.T) {
 	}
 }
 
+type conflictOnceOnConfigMapUpdateClient struct {
+	*spltest.MockClient
+	targetConfigMapName string
+	conflictInjected    bool
+}
+
+func (c *conflictOnceOnConfigMapUpdateClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if !c.conflictInjected && obj.GetName() == c.targetConfigMapName {
+		if _, ok := obj.(*corev1.ConfigMap); ok {
+			c.conflictInjected = true
+			return k8serrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, obj.GetName(), errors.New("simulated conflict"))
+		}
+	}
+	return c.MockClient.Update(ctx, obj, opts...)
+}
+
 func TestUpdateManualAppUpdateConfigMapLocked(t *testing.T) {
 	ctx := context.TODO()
 	cr := enterpriseApi.Standalone{
@@ -1381,6 +1399,22 @@ refCount: 1`
 	err = updateManualAppUpdateConfigMapLocked(ctx, c, &cr, appStatusContext, kind, turnOffManualChecking)
 	if err != nil {
 		t.Errorf("updateManualAppUpdateConfigMapLocked should not have returned error. err=%v", err)
+	}
+
+	// Test4: update conflict should be retried and eventually succeed
+	conflictClient := &conflictOnceOnConfigMapUpdateClient{
+		MockClient:          spltest.NewMockClient(),
+		targetConfigMapName: GetSplunkManualAppUpdateConfigMapName(cr.GetNamespace()),
+	}
+	conflictClient.AddObject(crConfigMap.DeepCopy())
+	conflictClient.AddObject(configMap.DeepCopy())
+
+	err = updateManualAppUpdateConfigMapLocked(ctx, conflictClient, &cr, appStatusContext, kind, false)
+	if err != nil {
+		t.Errorf("updateManualAppUpdateConfigMapLocked should retry conflicts and succeed. err=%v", err)
+	}
+	if !conflictClient.conflictInjected {
+		t.Errorf("expected test client to inject an update conflict")
 	}
 }
 

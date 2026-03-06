@@ -133,13 +133,19 @@ func UpdateStatefulSetPods(ctx context.Context, c splcommon.ControllerClient, st
 	replicas := *statefulSet.Spec.Replicas
 	readyReplicas := statefulSet.Status.ReadyReplicas
 	if readyReplicas < replicas {
-		scopedLog.Info("Waiting for pods to become ready")
+		scopedLog.Info("Waiting for StatefulSet pods to become ready",
+			"readyReplicas", readyReplicas,
+			"expectedReplicas", replicas,
+			"phaseHint", enterpriseApi.PhasePending)
 		if readyReplicas > 0 {
 			return enterpriseApi.PhaseScalingUp, nil
 		}
 		return enterpriseApi.PhasePending, nil
 	} else if readyReplicas > replicas {
-		scopedLog.Info("Waiting for scale down to complete")
+		scopedLog.Info("Waiting for StatefulSet scale down to complete",
+			"readyReplicas", readyReplicas,
+			"expectedReplicas", replicas,
+			"phaseHint", enterpriseApi.PhaseScalingDown)
 		return enterpriseApi.PhaseScalingDown, nil
 	}
 
@@ -215,8 +221,16 @@ func UpdateStatefulSetPods(ctx context.Context, c splcommon.ControllerClient, st
 			return enterpriseApi.PhaseError, err
 		}
 		if pod.Status.Phase != corev1.PodRunning || len(pod.Status.ContainerStatuses) == 0 || !pod.Status.ContainerStatuses[0].Ready {
-			scopedLog.Error(err, "Waiting for Pod to become ready", "podName", podName)
-			return enterpriseApi.PhaseUpdating, err
+			containerReady := false
+			if len(pod.Status.ContainerStatuses) > 0 {
+				containerReady = pod.Status.ContainerStatuses[0].Ready
+			}
+			scopedLog.V(1).Info("Waiting for pod readiness before continuing StatefulSet update",
+				"podName", podName,
+				"podPhase", pod.Status.Phase,
+				"containerReady", containerReady,
+				"phaseHint", enterpriseApi.PhaseUpdating)
+			return enterpriseApi.PhaseUpdating, nil
 		}
 
 		// terminate pod if it has pending updates; k8s will start a new one with revised template

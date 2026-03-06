@@ -15,8 +15,12 @@
 package enterprise
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,6 +43,34 @@ var (
 	phaseManagerBusyWaitDuration  = 1 * time.Second
 	phaseManagerLoopSleepDuration = 200 * time.Millisecond
 )
+
+var postSidecarTelemetryEnsure = func(ctx context.Context, endpoint string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if len(payload) == 0 {
+		return fmt.Errorf("status=%d", resp.StatusCode)
+	}
+	return fmt.Errorf("status=%d body=%s", resp.StatusCode, string(payload))
+}
+
+var postSidecarSHCBundleApply = func(ctx context.Context, endpoint string) error {
+	return postSidecarTelemetryEnsure(ctx, endpoint, nil)
+}
 
 var appPhaseInfoStatuses = map[enterpriseApi.AppPhaseStatusType]bool{
 	enterpriseApi.AppPkgDownloadPending:     true,
@@ -145,6 +177,74 @@ func runCustomCommandOnSplunkPods(ctx context.Context, cr splcommon.MetaObject, 
 	return err
 }
 
+func getInstanceTypeForTelAppCRKind(crKind string) (InstanceType, error) {
+	switch crKind {
+	case "Standalone":
+		return SplunkStandalone, nil
+	case "LicenseManager":
+		return SplunkLicenseManager, nil
+	case "LicenseMaster":
+		return SplunkLicenseMaster, nil
+	case "SearchHeadCluster":
+		return SplunkDeployer, nil
+	case "ClusterMaster":
+		return SplunkClusterMaster, nil
+	case "ClusterManager":
+		return SplunkClusterManager, nil
+	case "IngestorCluster":
+		return SplunkIngestor, nil
+	default:
+		return "", fmt.Errorf("invalid CR kind for telemetry app: %s", crKind)
+	}
+}
+
+func ensureTelAppViaSidecar(ctx context.Context, cr splcommon.MetaObject, replicas int32) error {
+	reqLogger := log.FromContext(ctx)
+	scopedLog := reqLogger.WithName("ensureTelAppViaSidecar").WithValues(
+		"kind", cr.GetObjectKind().GroupVersionKind().Kind,
+		"name", cr.GetName(),
+		"namespace", cr.GetNamespace(),
+		"replicas", replicas,
+	)
+
+	crKind := cr.GetObjectKind().GroupVersionKind().Kind
+	instanceType, err := getInstanceTypeForTelAppCRKind(crKind)
+	if err != nil {
+		return err
+	}
+
+	scope := "local"
+	if crKind == "SearchHeadCluster" {
+		scope = "shc"
+	}
+
+	body, err := json.Marshal(map[string]string{
+		"scope":    scope,
+		"app_name": telAppNameStr,
+	})
+	if err != nil {
+		return err
+	}
+
+	serviceName := GetSplunkServiceName(instanceType, cr.GetName(), true)
+	for replicaIndex := 0; replicaIndex < int(replicas); replicaIndex++ {
+		podName := getApplicablePodNameForAppFramework(cr, replicaIndex)
+		if strings.TrimSpace(podName) == "" {
+			continue
+		}
+
+		host := splcommon.GetServiceFQDN(cr.GetNamespace(), fmt.Sprintf("%s.%s", podName, serviceName))
+		endpoint := fmt.Sprintf("http://%s:8080/api/v1/admin/telemetry/app/ensure", host)
+		if err := postSidecarTelemetryEnsure(ctx, endpoint, body); err != nil {
+			scopedLog.Error(err, "failed ensuring telemetry app via sidecar", "pod", podName, "endpoint", endpoint)
+			return err
+		}
+		scopedLog.Info("ensured telemetry app via sidecar", "pod", podName, "scope", scope)
+	}
+
+	return nil
+}
+
 // Get extension for name of telemetry app
 func getTelAppNameExtension(crKind string) (string, error) {
 	switch crKind {
@@ -175,6 +275,16 @@ var addTelApp = func(ctx context.Context, podExecClient splutil.PodExecClientImp
 	scopedLog := reqLogger.WithName("addTelApp").WithValues(
 		"name", cr.GetObjectMeta().GetName(),
 		"namespace", cr.GetObjectMeta().GetNamespace())
+
+	// Multi-container mode uses distroless Splunk runtime and sidecar APIs for in-pod operations.
+	// Use sidecar API for telemetry app installation in multi-container mode.
+	if isMultiContainerPodEnabled() {
+		if err := ensureTelAppViaSidecar(ctx, cr, replicas); err != nil {
+			scopedLog.Error(err, "failed to ensure telemetry app via sidecar")
+			return err
+		}
+		return nil
+	}
 
 	// Create pod exec client
 	crKind := cr.GetObjectKind().GroupVersionKind().Kind
@@ -1747,6 +1857,45 @@ func (shcPlaybookContext *SHCPlaybookContext) triggerBundlePush(ctx context.Cont
 	return nil
 }
 
+func (shcPlaybookContext *SHCPlaybookContext) sidecarBundleApplyEndpoint() string {
+	serviceName := GetSplunkServiceName(SplunkDeployer, shcPlaybookContext.cr.GetName(), true)
+	host := splcommon.GetServiceFQDN(
+		shcPlaybookContext.cr.GetNamespace(),
+		fmt.Sprintf("%s.%s", shcPlaybookContext.targetPodName, serviceName),
+	)
+	return fmt.Sprintf("http://%s:8080/api/v1/admin/bundles/shc/apply", host)
+}
+
+func (shcPlaybookContext *SHCPlaybookContext) runPlaybookViaSidecar(ctx context.Context) error {
+	reqLogger := log.FromContext(ctx)
+	scopedLog := reqLogger.WithName("runPlaybookViaSidecar").WithValues(
+		"crName", shcPlaybookContext.cr.GetName(),
+		"namespace", shcPlaybookContext.cr.GetNamespace(),
+	)
+
+	appDeployContext := shcPlaybookContext.afwPipeline.appDeployContext
+	switch appDeployContext.BundlePushStatus.BundlePushStage {
+	case enterpriseApi.BundlePushPending, enterpriseApi.BundlePushInProgress:
+		// Keep probe behavior aligned with the existing bundle-push flow.
+		shcPlaybookContext.setLivenessProbeLevel(ctx, livenessProbeLevelOne)
+
+		endpoint := shcPlaybookContext.sidecarBundleApplyEndpoint()
+		if err := postSidecarSHCBundleApply(ctx, endpoint); err != nil {
+			scopedLog.Error(err, "failed applying SHC bundle via sidecar", "endpoint", endpoint)
+			return err
+		}
+
+		// Sidecar SHC bundle call is synchronous; mark completion immediately.
+		setBundlePushState(ctx, shcPlaybookContext.afwPipeline, enterpriseApi.BundlePushComplete)
+		shcPlaybookContext.afwPipeline.appDeployContext.BundlePushStatus.RetryCount = 0
+		setInstallStateForClusterScopedApps(ctx, appDeployContext)
+		shcPlaybookContext.setLivenessProbeLevel(ctx, livenessProbeLevelDefault)
+		return nil
+	default:
+		return fmt.Errorf("invalid bundle push state=%s", bundlePushStateAsStr(ctx, appDeployContext.BundlePushStatus.BundlePushStage))
+	}
+}
+
 // setLivenessProbeLevel sets the liveness probe level across all the Search Head Pods.
 func (shcPlaybookContext *SHCPlaybookContext) setLivenessProbeLevel(ctx context.Context, probeLevel int) error {
 	reqLogger := log.FromContext(ctx)
@@ -1827,6 +1976,10 @@ func (shcPlaybookContext *SHCPlaybookContext) runPlaybook(ctx context.Context) e
 	if cr.Status.Phase != enterpriseApi.PhaseReady {
 		scopedLog.Info("SHC is not ready yet.")
 		return nil
+	}
+
+	if isMultiContainerPodEnabled() {
+		return shcPlaybookContext.runPlaybookViaSidecar(ctx)
 	}
 
 	appDeployContext := shcPlaybookContext.afwPipeline.appDeployContext

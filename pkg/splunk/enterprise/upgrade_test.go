@@ -625,6 +625,52 @@ func TestUpgradePathValidation(t *testing.T) {
 
 }
 
+func TestUpgradePathValidationMonitoringConsoleDependencyWaitIsNotError(t *testing.T) {
+	sch := pkgruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(sch))
+	utilruntime.Must(corev1.AddToScheme(sch))
+	utilruntime.Must(enterpriseApi.AddToScheme(sch))
+
+	mc := &enterpriseApi.MonitoringConsole{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "MonitoringConsole",
+			APIVersion: enterpriseApi.GroupVersion.String(),
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mc",
+			Namespace: "test",
+		},
+	}
+	cm := &enterpriseApi.ClusterManager{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cm",
+			Namespace: "test",
+		},
+		Spec: enterpriseApi.ClusterManagerSpec{
+			CommonSplunkSpec: enterpriseApi.CommonSplunkSpec{
+				MonitoringConsoleRef: corev1.ObjectReference{Name: "mc"},
+			},
+		},
+		Status: enterpriseApi.ClusterManagerStatus{
+			Phase: enterpriseApi.PhasePending,
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(sch).
+		WithStatusSubresource(&enterpriseApi.ClusterManager{}).
+		WithObjects(mc, cm).
+		Build()
+
+	canProceed, err := UpgradePathValidation(context.Background(), client, mc, mc.Spec.CommonSplunkSpec, nil)
+	if err != nil {
+		t.Fatalf("UpgradePathValidation should not return error for pending dependency; err=%v", err)
+	}
+	if canProceed {
+		t.Fatalf("UpgradePathValidation should block reconcile when dependency is pending")
+	}
+}
+
 func TestUpgradeBlockedVersionMismatchEvent(t *testing.T) {
 	os.Setenv("SPLUNK_GENERAL_TERMS", "--accept-sgt-current-at-splunk-com")
 
@@ -717,6 +763,122 @@ func TestUpgradeBlockedVersionMismatchEvent(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Expected UpgradeBlockedVersionMismatch event to be published")
+	}
+}
+
+func TestUpgradePathValidation_WaitsForClusterManagerStatefulSet(t *testing.T) {
+	sch := pkgruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(sch))
+	utilruntime.Must(corev1.AddToScheme(sch))
+	utilruntime.Must(enterpriseApi.AddToScheme(sch))
+
+	client := fake.NewClientBuilder().
+		WithScheme(sch).
+		WithStatusSubresource(&enterpriseApi.ClusterManager{}).
+		Build()
+	ctx := context.TODO()
+
+	cm := enterpriseApi.ClusterManager{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "test"},
+		Spec: enterpriseApi.ClusterManagerSpec{
+			CommonSplunkSpec: enterpriseApi.CommonSplunkSpec{
+				Spec: enterpriseApi.Spec{Image: "splunk/splunk:test"},
+			},
+		},
+	}
+	cm.SetGroupVersionKind(enterpriseApi.GroupVersion.WithKind("ClusterManager"))
+	if err := client.Create(ctx, &cm); err != nil {
+		t.Fatalf("Failed to create ClusterManager: %v", err)
+	}
+	cm.Status.Phase = enterpriseApi.PhaseReady
+	if err := client.Status().Update(ctx, &cm); err != nil {
+		t.Fatalf("Failed to update ClusterManager status: %v", err)
+	}
+
+	shc := enterpriseApi.SearchHeadCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-shc", Namespace: "test"},
+		Spec: enterpriseApi.SearchHeadClusterSpec{
+			CommonSplunkSpec: enterpriseApi.CommonSplunkSpec{
+				Spec: enterpriseApi.Spec{Image: "splunk/splunk:test"},
+				ClusterManagerRef: corev1.ObjectReference{
+					Name: "test-cm",
+				},
+			},
+		},
+	}
+	shc.SetGroupVersionKind(enterpriseApi.GroupVersion.WithKind("SearchHeadCluster"))
+
+	continueReconcile, err := UpgradePathValidation(ctx, client, &shc, shc.Spec.CommonSplunkSpec, nil)
+	if err != nil {
+		t.Fatalf("Expected no error when ClusterManager StatefulSet is not yet created, got: %v", err)
+	}
+	if continueReconcile {
+		t.Fatalf("Expected continueReconcile=false while waiting for ClusterManager StatefulSet")
+	}
+}
+
+func TestUpgradePathValidation_WaitsForClusterManagerReadyPhase(t *testing.T) {
+	sch := pkgruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(sch))
+	utilruntime.Must(corev1.AddToScheme(sch))
+	utilruntime.Must(enterpriseApi.AddToScheme(sch))
+
+	client := fake.NewClientBuilder().
+		WithScheme(sch).
+		WithStatusSubresource(&enterpriseApi.ClusterManager{}).
+		Build()
+	ctx := context.TODO()
+
+	cm := enterpriseApi.ClusterManager{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "test"},
+		Spec: enterpriseApi.ClusterManagerSpec{
+			CommonSplunkSpec: enterpriseApi.CommonSplunkSpec{
+				Spec: enterpriseApi.Spec{Image: "splunk/splunk:test"},
+			},
+		},
+	}
+	cm.SetGroupVersionKind(enterpriseApi.GroupVersion.WithKind("ClusterManager"))
+	if err := client.Create(ctx, &cm); err != nil {
+		t.Fatalf("Failed to create ClusterManager: %v", err)
+	}
+	cm.Status.Phase = enterpriseApi.PhasePending
+	if err := client.Status().Update(ctx, &cm); err != nil {
+		t.Fatalf("Failed to update ClusterManager status: %v", err)
+	}
+
+	cmSS := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "splunk-test-cm-cluster-manager", Namespace: "test"},
+		Spec: appsv1.StatefulSetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "test"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "test"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "splunk", Image: "splunk/splunk:test"}}},
+			},
+		},
+	}
+	if err := client.Create(ctx, cmSS); err != nil {
+		t.Fatalf("Failed to create CM StatefulSet: %v", err)
+	}
+
+	idx := enterpriseApi.IndexerCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-idx", Namespace: "test"},
+		Spec: enterpriseApi.IndexerClusterSpec{
+			CommonSplunkSpec: enterpriseApi.CommonSplunkSpec{
+				Spec: enterpriseApi.Spec{Image: "splunk/splunk:test"},
+				ClusterManagerRef: corev1.ObjectReference{
+					Name: "test-cm",
+				},
+			},
+		},
+	}
+	idx.SetGroupVersionKind(enterpriseApi.GroupVersion.WithKind("IndexerCluster"))
+
+	continueReconcile, err := UpgradePathValidation(ctx, client, &idx, idx.Spec.CommonSplunkSpec, nil)
+	if err != nil {
+		t.Fatalf("Expected no error while waiting for ClusterManager to be ready, got: %v", err)
+	}
+	if continueReconcile {
+		t.Fatalf("Expected continueReconcile=false while waiting for ClusterManager phase Ready")
 	}
 }
 

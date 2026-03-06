@@ -212,8 +212,12 @@ func ApplyIndexerClusterManager(ctx context.Context, client splcommon.Controller
 	if !statefulSet.CreationTimestamp.IsZero() {
 		// check if the IndexerCluster is ready for version upgrade
 		continueReconcile, err := UpgradePathValidation(ctx, client, cr, cr.Spec.CommonSplunkSpec, &mgr)
-		if err != nil || !continueReconcile {
+		if err != nil {
 			return result, err
+		}
+		if !continueReconcile {
+			cr.Status.Phase = enterpriseApi.PhasePending
+			return result, nil
 		}
 	}
 
@@ -507,8 +511,12 @@ func ApplyIndexerCluster(ctx context.Context, client splcommon.ControllerClient,
 	if !statefulSet.CreationTimestamp.IsZero() {
 		// check if the IndexerCluster is ready for version upgrade
 		continueReconcile, err := UpgradePathValidation(ctx, client, cr, cr.Spec.CommonSplunkSpec, &mgr)
-		if err != nil || !continueReconcile {
+		if err != nil {
 			return result, err
+		}
+		if !continueReconcile {
+			cr.Status.Phase = enterpriseApi.PhasePending
+			return result, nil
 		}
 	}
 

@@ -170,15 +170,17 @@ func GetPodAppInstallStatus(ctx context.Context, deployment *Deployment, podName
 	var stdout, stderr string
 	var err error
 	for i := 0; i < 10; i++ {
-		stdout, stderr, err = deployment.PodExecCommand(ctx, podName, command, stdin, false)
+		execCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		stdout, stderr, err = deployment.PodExecCommand(execCtx, podName, command, stdin, false)
+		cancel()
 		if err == nil {
-			continue
-		} else if err != nil && i == 9 {
+			break
+		}
+		if i == 9 {
 			logf.Log.Error(err, "Failed to execute command on pod", "pod", podName, "command", command, "stdin", stdin)
 			return "", err
-		} else {
-			time.Sleep(1 * time.Second)
 		}
+		time.Sleep(1 * time.Second)
 	}
 
 	logf.Log.Info("Command executed", "on pod", podName, "command", command, "stdin", stdin, "stdout", stdout, "stderr", stderr)

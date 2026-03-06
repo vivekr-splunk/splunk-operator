@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -336,8 +337,11 @@ var _ = Describe("c3appfw test", func() {
 			}
 
 			// Upload V1 apps to Gcs for Monitoring Console
-			oldImage := "Refer to RELATED_SPLUNK_IMAGE_ENTERPRISE"
-			newImage := "splunk/splunk:latest"
+			oldImage := testcaseEnvInst.GetSplunkImage()
+			newImage := strings.TrimSpace(os.Getenv("SPLUNK_ENTERPRISE_IMAGE_UPGRADE"))
+			if newImage == "" {
+				newImage = testcaseEnvInst.GetSplunkImage()
+			}
 
 			lm, err := deployment.DeployLicenseManager(ctx, deployment.GetName())
 			cm, err := deployment.DeployClusterManager(ctx, deployment.GetName(), lm.GetName(), "", "")

@@ -173,6 +173,12 @@ func ApplyClusterManager(ctx context.Context, client splcommon.ControllerClient,
 		return result, err
 	}
 
+	// create or update a headless service for the cluster manager
+	err = splctrl.ApplyService(ctx, client, getSplunkService(ctx, cr, &cr.Spec.CommonSplunkSpec, SplunkClusterManager, true))
+	if err != nil {
+		return result, err
+	}
+
 	// create or update a regular service for the cluster manager
 	err = splctrl.ApplyService(ctx, client, getSplunkService(ctx, cr, &cr.Spec.CommonSplunkSpec, SplunkClusterManager, false))
 	if err != nil {
@@ -196,8 +202,12 @@ func ApplyClusterManager(ctx context.Context, client splcommon.ControllerClient,
 	if !statefulSet.CreationTimestamp.IsZero() {
 		// check if the ClusterManager is ready for version upgrade, if required
 		continueReconcile, err := UpgradePathValidation(ctx, client, cr, cr.Spec.CommonSplunkSpec, nil)
-		if err != nil || !continueReconcile {
+		if err != nil {
 			return result, err
+		}
+		if !continueReconcile {
+			cr.Status.Phase = enterpriseApi.PhasePending
+			return result, nil
 		}
 	}
 

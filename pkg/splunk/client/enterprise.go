@@ -814,7 +814,24 @@ func (c *SplunkClient) UpdateDMCGroups(dmcGroupName string, groupMembers string)
 	request, _ := http.NewRequest("POST", endpoint, strings.NewReader(groupMembers))
 	expectedStatus := []int{200, 201, 409}
 	err := c.Do(request, expectedStatus, nil)
+	if err != nil && isIgnorableMissingDMCGroupError(err, dmcGroupName) {
+		return nil
+	}
 	return err
+}
+
+func isIgnorableMissingDMCGroupError(err error, dmcGroupName string) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "response code=404") {
+		return false
+	}
+	if !strings.Contains(errMsg, fmt.Sprintf("/services/search/distributed/groups/%s/edit", dmcGroupName)) {
+		return false
+	}
+	return strings.Contains(errMsg, "There is no search group named")
 }
 
 // UpdateDMCClusteringLabelGroup update respective clustering group
